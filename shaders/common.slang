@@ -7,30 +7,6 @@ public struct Vertex
     public float4 tangent;
     public float4 color;
     public float2 uv;
-    public uint4 joints;
-    public float4 weights;
-};
-
-public struct VertexPacked
-{
-    public float3 position;
-    public float uv_x;
-    public float3 normal;
-    public float uv_y;
-    public float4 tangent;
-    public float4 color;
-};
-
-public struct VertexSkeletonPacked
-{
-    public float3 position;
-    public float uv_x;
-    public float3 normal;
-    public float uv_y;
-    public float4 tangent;
-    public float4 color;
-    public uint4 joints;
-    public float4 weights;
 };
 
 public struct Model
@@ -40,17 +16,41 @@ public struct Model
     public float4 flags;
 };
 
-public struct Primitive
+public struct TraditionalPrimitive {
+    public uint firstIndex;
+    public int vertexOffset;
+    public uint indexCount;
+    public uint materialIndex;
+    public float4 boundingSphere;  // xyz = center, w = radius
+};
+
+
+public struct Instance
 {
-    public uint32_t firstIndex;
-    public uint32_t indexCount;
-    public int32_t vertexOffset;
-    public uint32_t bHasTransparent;
+    public uint32_t primitiveIndex;
+    public uint32_t modelIndex;
+    public uint32_t jointMatrixOffset;
+    public uint32_t bIsAllocated;
+};
+
+public struct TraditionalPrimitiveData {
+    public TraditionalPrimitive[] primitives;
+}
+
+public struct ModelData {
+    public Model[] models;
+}
+
+public struct InstanceData {
+    public Instance[] instances;
+}
+
+public struct MeshletPrimitive
+{
+    public uint32_t meshletOffset;
+    public uint32_t meshletCount;
     public uint32_t materialIndex;
-    public uint32_t bHasSkinning;
-    uint32_t padding1;
-    uint32_t padding2;
-    // {3} center, {1} radius
+    uint32_t padding;
     public float4 boundingSphere;
 };
 
@@ -65,29 +65,6 @@ public struct Meshlet
     uint32_t padding2;
     uint32_t padding3;
 };
-
-public struct MeshletPrimitive
-{
-    public uint32_t meshletOffset;
-    public uint32_t meshletCount;
-    public uint32_t materialIndex;
-    public uint32_t bHasTransparent;
-    public uint32_t bHasSkinning;
-    uint32_t padding1;
-    uint32_t padding2;
-    uint32_t padding3;
-    public float4 boundingSphere;
-};
-
-
-public struct Instance
-{
-    public uint32_t primitiveIndex;
-    public uint32_t modelIndex;
-    public uint32_t jointMatrixOffset;
-    public uint32_t bIsAllocated;
-};
-
 
 public struct MaterialProperties
 {
@@ -155,10 +132,6 @@ public struct MaterialData {
     public MaterialProperties[] materials;
 }
 
-public struct PrimitiveData {
-    public Primitive[] primitives;
-}
-
 public struct MeshletPrimitiveData {
     public MeshletPrimitive[] primitives;
 }
@@ -183,13 +156,7 @@ public struct MeshletTrianglesData {
     public MeshletTriangleIndex[] meshletTriangles;
 };
 
-public struct ModelData {
-    public Model[] models;
-}
 
-public struct InstanceData {
-    public Instance[] instances;
-}
 
 public struct VkDrawIndexedIndirectCommand
 {

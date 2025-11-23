@@ -24,6 +24,10 @@ add_library(render-lib STATIC
 
         pipelines/basic_mesh_shader_pipeline.cpp
         pipelines/basic_mesh_shader_pipeline.h
+        model/model_types.cpp
+        model/model_types.h
+        pipelines/traditional_pipeline.cpp
+        pipelines/traditional_pipeline.h
 )
 
 target_link_libraries(render-lib PUBLIC

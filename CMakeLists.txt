@@ -2,6 +2,8 @@ cmake_minimum_required(VERSION 4.0)
 project(MeshTaskBenchmark)
 
 set(CMAKE_CXX_STANDARD 20)
+
+add_compile_definitions(NOMINMAX)
 add_definitions(-DGLM_FORCE_DEPTH_ZERO_TO_ONE)
 add_definitions(-DVK_NO_PROTOTYPES)
 
@@ -55,6 +57,8 @@ add_custom_command(TARGET meshTaskBenchmark POST_BUILD
 )
 
 compile_shaders(meshTaskBenchmark
+        ${CMAKE_SOURCE_DIR}/shaders/traditional.slang vertex vertexMain
+        ${CMAKE_SOURCE_DIR}/shaders/traditional.slang fragment fragmentMain
         ${CMAKE_SOURCE_DIR}/shaders/basicMeshShader.slang task taskMain
         ${CMAKE_SOURCE_DIR}/shaders/basicMeshShader.slang mesh meshMain
         ${CMAKE_SOURCE_DIR}/shaders/basicMeshShader.slang fragment fragmentMain

@@ -7,14 +7,21 @@
 #include <array>
 #include <fmt/format.h>
 
+#include "meshoptimizer.h"
 #include "render/vk_context.h"
 #include "input/input.h"
 #include "core/time.h"
+
+#include "fastgltf/core.hpp"
+#include "fastgltf/tools.hpp"
+#include "fastgltf/types.hpp"
+
 #include "render/render_targets.h"
 #include "render/render_utils.h"
 #include "render/vk_helpers.h"
 #include "render/vk_swapchain.h"
 #include "render/vk_synchronization.h"
+#include "render/model/model_types.h"
 
 MeshTaskBenchmark::MeshTaskBenchmark() = default;
 
@@ -49,24 +56,26 @@ void MeshTaskBenchmark::Initialize()
 
     constexpr int32_t tripleBuffering = 3;
     frameSynchronization.reserve(tripleBuffering);
-
-    VkBufferCreateInfo bufferInfo = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
-    bufferInfo.pNext = nullptr;
-    VmaAllocationCreateInfo vmaAllocInfo = {};
-    vmaAllocInfo.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST;
-    vmaAllocInfo.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
-    bufferInfo.usage = VK_BUFFER_USAGE_2_SHADER_DEVICE_ADDRESS_BIT;
-    bufferInfo.size = sizeof(Renderer::SceneData);
-
     for (int32_t i = 0; i < tripleBuffering; ++i) {
         frameSynchronization.emplace_back(context.get());
         frameSynchronization[i].Initialize();
-
-        sceneDataBuffers.push_back(Renderer::VkResources::CreateAllocatedBuffer(context.get(), bufferInfo, vmaAllocInfo));
     }
 
     basicMeshShaderPipeline = Renderer::BasicMeshShaderPipeline(context.get());
+    traditionalPipeline = Renderer::TraditionalPipeline(context.get());
+
+    CreateBuffers();
+
+    materialBufferAllocator.allocate(sizeof(Renderer::MaterialProperties));
+    Renderer::MaterialProperties defaultMaterial{};
+    memcpy(static_cast<char*>(materialBuffer.allocationInfo.pMappedData), &defaultMaterial, sizeof(Renderer::MaterialProperties));
+
+    std::filesystem::path bunnyPath = "assets/stanford_bunny/stanford_bunny.gltf";
+    bunnyModel = LoadModel(bunnyPath);
+
+    InstanceGeneration();
 }
+
 void MeshTaskBenchmark::Run()
 {
     Input& input = Input::Input::Get();
@@ -88,7 +97,6 @@ void MeshTaskBenchmark::Run()
         }
 
 
-
         input.UpdateFocus(SDL_GetWindowFlags(window));
         time.Update();
 
@@ -98,7 +106,6 @@ void MeshTaskBenchmark::Run()
         const uint32_t currentFrameInFlight = frameNumber % swapchain->imageCount;
         Renderer::FrameSynchronization& currentFrameSync = frameSynchronization[currentFrameInFlight];
         Render(currentFrameInFlight, currentFrameSync);
-        fmt::println("Loop {}", frameNumber);
         frameNumber++;
     }
 }
@@ -124,7 +131,6 @@ void MeshTaskBenchmark::Render(uint32_t currentFrameInFlight, Renderer::FrameSyn
 
     //
     {
-
         const glm::vec3 cameraPos = freeCamera.GetPosition();
         const glm::vec3 forward = freeCamera.GetForward();
         const glm::vec3 up = freeCamera.GetUp();
@@ -179,7 +185,7 @@ void MeshTaskBenchmark::Render(uint32_t currentFrameInFlight, Renderer::FrameSyn
 
 
         vkCmdBeginRendering(cmd, &renderInfo);
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, basicMeshShaderPipeline.pipeline.handle);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, traditionalPipeline.pipeline.handle);
 
         VkViewport viewport = Renderer::VkHelpers::GenerateViewport(extents[0], extents[1]);
         vkCmdSetViewport(cmd, 0, 1, &viewport);
@@ -187,14 +193,29 @@ void MeshTaskBenchmark::Render(uint32_t currentFrameInFlight, Renderer::FrameSyn
         vkCmdSetScissor(cmd, 0, 1, &scissor);
 
         Renderer::AllocatedBuffer& currentSceneDataBuffer = sceneDataBuffers[currentFrameInFlight];
-        Renderer::BasicMeshShaderPushConstants pushData{
-            glm::mat4(1.0f),
-            currentSceneDataBuffer.address,
 
+        Renderer::TraditionalPipelinePushConstant pushData{
+            .sceneData = currentSceneDataBuffer.address,
+            .materialBuffer = materialBuffer.address,
+            .primitiveBuffer = traditionalPrimitiveBuffer.address,
+            .modelBuffer = modelBuffer.address,
+            .instanceBuffer = instanceBuffer.address,
         };
 
-        vkCmdPushConstants(cmd, basicMeshShaderPipeline.pipelineLayout.handle, VK_SHADER_STAGE_MESH_BIT_EXT | VK_SHADER_STAGE_TASK_BIT_EXT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(Renderer::BasicMeshShaderPushConstants), &pushData);
-        vkCmdDrawMeshTasksEXT(cmd, 1, 1, 1);
+        vkCmdPushConstants(cmd, traditionalPipeline.pipelineLayout.handle, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(Renderer::TraditionalPipelinePushConstant), &pushData);
+        constexpr VkDeviceSize vertexOffset = 0;
+        vkCmdBindVertexBuffers(cmd, 0, 1, &megaVertexBuffer.handle, &vertexOffset);
+        vkCmdBindIndexBuffer(cmd, megaIndexBuffer.handle, 0, VK_INDEX_TYPE_UINT32);
+
+        vkCmdDrawIndexed(
+            cmd,
+            bunnyModel.indexCount, // 144,046 triangles * 3
+            125, // instanceCount - all instances
+            bunnyModel.indexOffset,
+            bunnyModel.vertexOffset,
+            0
+        );
+
         vkCmdEndRendering(cmd);
     }
 
@@ -278,7 +299,6 @@ void MeshTaskBenchmark::Render(uint32_t currentFrameInFlight, Renderer::FrameSyn
     const VkResult presentResult = vkQueuePresentKHR(context->graphicsQueue, &presentInfo);
 
     if (presentResult == VK_ERROR_OUT_OF_DATE_KHR || presentResult == VK_SUBOPTIMAL_KHR) {
-
         fmt::println("Swapchain out of date or suboptimal (Present)\n");
         exit(1);
         return;
@@ -287,8 +307,447 @@ void MeshTaskBenchmark::Render(uint32_t currentFrameInFlight, Renderer::FrameSyn
 
 void MeshTaskBenchmark::Cleanup()
 {
-
     vkDeviceWaitIdle(context->device);
 
     SDL_DestroyWindow(window);
+}
+
+void MeshTaskBenchmark::CreateBuffers()
+{
+    constexpr int32_t tripleBuffering = 3;
+    frameSynchronization.reserve(tripleBuffering);
+
+    VkBufferCreateInfo bufferInfo = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+    bufferInfo.pNext = nullptr;
+    VmaAllocationCreateInfo vmaAllocInfo = {};
+    vmaAllocInfo.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST;
+    vmaAllocInfo.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
+    bufferInfo.usage = VK_BUFFER_USAGE_2_SHADER_DEVICE_ADDRESS_BIT;
+    bufferInfo.size = sizeof(Renderer::SceneData);
+
+    for (int32_t i = 0; i < tripleBuffering; ++i) {
+        sceneDataBuffers.push_back(Renderer::VkResources::CreateAllocatedBuffer(context.get(), bufferInfo, vmaAllocInfo));
+    }
+
+
+    bufferInfo.usage = VK_BUFFER_USAGE_2_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_2_SHADER_DEVICE_ADDRESS_BIT;
+    bufferInfo.size = sizeof(Renderer::Vertex) * Renderer::MEGA_VERTEX_BUFFER_COUNT;
+    megaVertexBuffer = Renderer::VkResources::CreateAllocatedBuffer(context.get(), bufferInfo, vmaAllocInfo);
+    bufferInfo.usage = VK_BUFFER_USAGE_2_SHADER_DEVICE_ADDRESS_BIT;
+    bufferInfo.size = sizeof(Renderer::MaterialProperties) * Renderer::MEGA_MATERIAL_BUFFER_COUNT;
+    materialBuffer = Renderer::VkResources::CreateAllocatedBuffer(context.get(), bufferInfo, vmaAllocInfo);
+
+    bufferInfo.usage = VK_BUFFER_USAGE_2_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_2_SHADER_DEVICE_ADDRESS_BIT;
+    bufferInfo.size = sizeof(uint32_t) * Renderer::MEGA_INDEX_BUFFER_COUNT;
+    megaIndexBuffer = Renderer::VkResources::CreateAllocatedBuffer(context.get(), bufferInfo, vmaAllocInfo);
+    bufferInfo.size = sizeof(Renderer::TraditionalPrimitive) * Renderer::MEGA_PRIMITIVE_BUFFER_COUNT;
+    traditionalPrimitiveBuffer = Renderer::VkResources::CreateAllocatedBuffer(context.get(), bufferInfo, vmaAllocInfo);
+
+    bufferInfo.size = sizeof(uint32_t) * Renderer::MEGA_INDEX_BUFFER_COUNT;
+    megaMeshletVerticesBuffer = Renderer::VkResources::CreateAllocatedBuffer(context.get(), bufferInfo, vmaAllocInfo);
+    bufferInfo.size = sizeof(uint8_t) * Renderer::MEGA_INDEX_BUFFER_COUNT;
+    megaMeshletTrianglesBuffer = Renderer::VkResources::CreateAllocatedBuffer(context.get(), bufferInfo, vmaAllocInfo);
+    bufferInfo.size = sizeof(uint32_t) * Renderer::MEGA_INDEX_BUFFER_COUNT;
+    megaMeshletBuffer = Renderer::VkResources::CreateAllocatedBuffer(context.get(), bufferInfo, vmaAllocInfo);
+    bufferInfo.size = sizeof(Renderer::MeshletPrimitive) * Renderer::MEGA_PRIMITIVE_BUFFER_COUNT;
+    meshletPrimitiveBuffer = Renderer::VkResources::CreateAllocatedBuffer(context.get(), bufferInfo, vmaAllocInfo);
+
+    bufferInfo.size = sizeof(Renderer::Model) * Renderer::BINDLESS_MODEL_MATRIX_COUNT;
+    modelBuffer = Renderer::VkResources::CreateAllocatedBuffer(context.get(), bufferInfo, vmaAllocInfo);
+    bufferInfo.size = sizeof(Renderer::Instance) * Renderer::BINDLESS_INSTANCE_COUNT;
+    instanceBuffer = Renderer::VkResources::CreateAllocatedBuffer(context.get(), bufferInfo, vmaAllocInfo);
+}
+
+void MeshTaskBenchmark::InstanceGeneration()
+{
+    constexpr int32_t gridSize = 5;
+    constexpr float spacing = 3.0f;
+    constexpr int32_t totalInstances = gridSize * gridSize * gridSize;
+
+    // Hard coded bunny rotation-fix
+    glm::quat bunnyRotation(0.7071068f, 0.7071068f, 0.0f, 0.0f);
+    glm::mat4 bunnyCorrection = glm::mat4_cast(bunnyRotation);
+
+    std::vector<Renderer::Model> models;
+    models.reserve(totalInstances);
+
+    for (int x = 0; x < gridSize; x++) {
+        for (int y = 0; y < gridSize; y++) {
+            for (int z = 0; z < gridSize; z++) {
+                glm::mat4 mat{1.0f};
+                mat = glm::translate(mat, glm::vec3(
+                    x * spacing - (gridSize * spacing) / 2.0f,
+                    y * spacing - (gridSize * spacing) / 2.0f,
+                    z * spacing - (gridSize * spacing) / 2.0f
+                ));
+                mat = mat * bunnyCorrection;
+
+                models.push_back(Renderer::Model{mat});
+            }
+        }
+    }
+
+    memcpy(static_cast<char*>(modelBuffer.allocationInfo.pMappedData), models.data(), models.size() * sizeof(Renderer::Model));
+
+    std::vector<Renderer::Instance> instances;
+    instances.reserve(totalInstances);
+
+    for (uint32_t i = 0; i < totalInstances; i++) {
+        Renderer::Instance inst;
+        inst.modelIndex = i;
+        inst.primitiveIndex = 0;
+        inst.bIsAllocated = 1;
+        inst.jointMatrixOffset = 0;
+        instances.push_back(inst);
+    }
+
+    memcpy(static_cast<char*>(instanceBuffer.allocationInfo.pMappedData), instances.data(), instances.size() * sizeof(Renderer::Instance));
+
+    fmt::println("Spawning {} instances of the bunny", totalInstances);
+}
+
+glm::vec4 MeshTaskBenchmark::GenerateBoundingSphere(const std::vector<Renderer::Vertex>& vertices)
+{
+    glm::vec3 center = {0, 0, 0};
+
+    for (auto&& vertex : vertices) {
+        center += vertex.position;
+    }
+    center /= static_cast<float>(vertices.size());
+
+
+    float radius = glm::dot(vertices[0].position - center, vertices[0].position - center);
+    for (size_t i = 1; i < vertices.size(); ++i) {
+        radius = std::max(radius, glm::dot(vertices[i].position - center, vertices[i].position - center));
+    }
+    radius = std::nextafter(sqrtf(radius), std::numeric_limits<float>::max());
+
+    return glm::vec4(center, radius);
+}
+
+Renderer::ModelData MeshTaskBenchmark::LoadModel(const std::filesystem::path& path)
+{
+    Renderer::ModelData model{};
+    fastgltf::Parser parser{fastgltf::Extensions::KHR_texture_basisu | fastgltf::Extensions::KHR_mesh_quantization | fastgltf::Extensions::KHR_texture_transform};
+    constexpr auto gltfOptions = fastgltf::Options::DontRequireValidAssetMember
+                                 | fastgltf::Options::AllowDouble
+                                 | fastgltf::Options::LoadExternalBuffers
+                                 | fastgltf::Options::LoadExternalImages;
+
+    auto gltfFile = fastgltf::MappedGltfFile::FromPath(path);
+    if (!static_cast<bool>(gltfFile)) {
+        fmt::println("Failed to open glTF file. "
+                     "It's supposed to be at {}. "
+                     "Please download the Stanford Bunny from https://casual-effects.com/data/ and convert it from .obj to .gltf using blender.", absolute(path).string());
+        return {};
+    }
+
+    auto load = parser.loadGltf(gltfFile.get(), path.parent_path(), gltfOptions);
+    if (!load) {
+        fmt::println("Failed to load glTF: {}\n", to_underlying(load.error()));
+        return {};
+    }
+
+    model.name = path.filename().string();
+    model.path = path;
+    fastgltf::Asset gltf = std::move(load.get());
+
+    model.meshes.reserve(gltf.meshes.size());
+
+    // Used by both
+    std::vector<Renderer::Vertex> allVertices{};
+    std::vector<Renderer::MaterialProperties> materials{};
+
+    // Traditional only
+    std::vector<Renderer::TraditionalPrimitive> traditionalPrimitives{};
+    std::vector<uint32_t> allIndices{};
+
+    // Meshlet Only
+    std::vector<Renderer::MeshletPrimitive> meshletPrimitives{};
+    std::vector<Renderer::Meshlet> allMeshlets{};
+    std::vector<uint32_t> allMeshletVertices{};
+    std::vector<uint8_t> allMeshletTriangles{};
+
+    // Temp loop vars
+    std::vector<Renderer::Vertex> primitiveVertices{};
+    std::vector<uint32_t> primitiveIndices{};
+
+    for (fastgltf::Mesh& mesh : gltf.meshes) {
+        Renderer::MeshInformation meshData{};
+        meshData.name = mesh.name;
+        meshData.primitiveIndices.reserve(mesh.primitives.size());
+        meshletPrimitives.reserve(meshletPrimitives.size() + mesh.primitives.size());
+        traditionalPrimitives.reserve(traditionalPrimitives.size() + mesh.primitives.size());
+
+        for (fastgltf::Primitive& p : mesh.primitives) {
+            Renderer::TraditionalPrimitive traditionalPrimitive{};
+            Renderer::MeshletPrimitive meshletPrimitive{};
+
+            if (p.materialIndex.has_value()) {
+                constexpr int32_t materialIndexOffset = 1;
+                traditionalPrimitive.materialIndex = p.materialIndex.value() + materialIndexOffset;
+                meshletPrimitive.materialIndex = p.materialIndex.value() + materialIndexOffset;
+            }
+
+            // INDICES
+            const fastgltf::Accessor& indexAccessor = gltf.accessors[p.indicesAccessor.value()];
+            primitiveIndices.clear();
+            primitiveIndices.reserve(indexAccessor.count);
+
+            fastgltf::iterateAccessor<std::uint32_t>(gltf, indexAccessor, [&](const std::uint32_t idx) {
+                primitiveIndices.push_back(idx);
+            });
+
+            // POSITION (REQUIRED)
+            const fastgltf::Attribute* positionIt = p.findAttribute("POSITION");
+            const fastgltf::Accessor& posAccessor = gltf.accessors[positionIt->accessorIndex];
+            primitiveVertices.clear();
+            primitiveVertices.resize(posAccessor.count);
+
+            fastgltf::iterateAccessorWithIndex<fastgltf::math::fvec3>(gltf, posAccessor, [&](fastgltf::math::fvec3 v, const size_t index) {
+                primitiveVertices[index] = {};
+                primitiveVertices[index].position = {v.x(), v.y(), v.z()};
+            });
+
+
+            // NORMALS
+            const fastgltf::Attribute* normals = p.findAttribute("NORMAL");
+            if (normals != p.attributes.end()) {
+                fastgltf::iterateAccessorWithIndex<fastgltf::math::fvec3>(gltf, gltf.accessors[normals->accessorIndex], [&](fastgltf::math::fvec3 n, const size_t index) {
+                    primitiveVertices[index].normal = {n.x(), n.y(), n.z()};
+                });
+            }
+
+            // TANGENTS
+            const fastgltf::Attribute* tangents = p.findAttribute("TANGENT");
+            if (tangents != p.attributes.end()) {
+                fastgltf::iterateAccessorWithIndex<fastgltf::math::fvec4>(gltf, gltf.accessors[tangents->accessorIndex], [&](fastgltf::math::fvec4 t, const size_t index) {
+                    primitiveVertices[index].tangent = {t.x(), t.y(), t.z(), t.w()};
+                });
+            }
+
+            // UV
+            const fastgltf::Attribute* uvs = p.findAttribute("TEXCOORD_0");
+            if (uvs != p.attributes.end()) {
+                const fastgltf::Accessor& uvAccessor = gltf.accessors[uvs->accessorIndex];
+
+                switch (uvAccessor.componentType) {
+                    case fastgltf::ComponentType::Byte:
+                        fastgltf::iterateAccessorWithIndex<fastgltf::math::s8vec2>(gltf, uvAccessor, [&](fastgltf::math::s8vec2 uv, const size_t index) {
+                            // f = max(c / 127.0, -1.0)
+                            float u = std::max(static_cast<float>(uv.x()) / 127.0f, -1.0f);
+                            float v = std::max(static_cast<float>(uv.y()) / 127.0f, -1.0f);
+                            primitiveVertices[index].uv = {u, v};
+                        });
+                        break;
+                    case fastgltf::ComponentType::UnsignedByte:
+                        fastgltf::iterateAccessorWithIndex<fastgltf::math::u8vec2>(gltf, uvAccessor, [&](fastgltf::math::u8vec2 uv, const size_t index) {
+                            // f = c / 255.0
+                            float u = static_cast<float>(uv.x()) / 255.0f;
+                            float v = static_cast<float>(uv.y()) / 255.0f;
+                            primitiveVertices[index].uv = {u, v};
+                        });
+                        break;
+                    case fastgltf::ComponentType::Short:
+                        fastgltf::iterateAccessorWithIndex<fastgltf::math::s16vec2>(gltf, uvAccessor, [&](fastgltf::math::s16vec2 uv, const size_t index) {
+                            // f = max(c / 32767.0, -1.0)
+                            float u = std::max(
+                                static_cast<float>(uv.x()) / 32767.0f, -1.0f);
+                            float v = std::max(
+                                static_cast<float>(uv.y()) / 32767.0f, -1.0f);
+                            primitiveVertices[index].uv = {u, v};
+                        });
+                        break;
+                    case fastgltf::ComponentType::UnsignedShort:
+                        fastgltf::iterateAccessorWithIndex<fastgltf::math::u16vec2>(gltf, uvAccessor, [&](fastgltf::math::u16vec2 uv, const size_t index) {
+                            // f = c / 65535.0
+                            float u = static_cast<float>(uv.x()) / 65535.0f;
+                            float v = static_cast<float>(uv.y()) / 65535.0f;
+                            primitiveVertices[index].uv = {u, v};
+                        });
+                        break;
+                    case fastgltf::ComponentType::Float:
+                        fastgltf::iterateAccessorWithIndex<fastgltf::math::fvec2>(gltf, uvAccessor, [&](fastgltf::math::fvec2 uv, const size_t index) {
+                            primitiveVertices[index].uv = {uv.x(), uv.y()};
+                        });
+                        break;
+                    default:
+                        fmt::print("Unsupported UV component type: {}\n", static_cast<int>(uvAccessor.componentType));
+                        break;
+                }
+            }
+
+            // VERTEX COLOR
+            const fastgltf::Attribute* colors = p.findAttribute("COLOR_0");
+            if (colors != p.attributes.end()) {
+                fastgltf::iterateAccessorWithIndex<fastgltf::math::fvec4>(gltf, gltf.accessors[colors->accessorIndex], [&](const fastgltf::math::fvec4& color, const size_t index) {
+                    primitiveVertices[index].color = {
+                        color.x(), color.y(), color.z(), color.w()
+                    };
+                });
+            }
+
+
+            // ====== Traditional Primitive =====
+            traditionalPrimitive.firstIndex = static_cast<uint32_t>(allIndices.size());
+            traditionalPrimitive.vertexOffset = static_cast<int32_t>(allVertices.size());
+            traditionalPrimitive.indexCount = static_cast<uint32_t>(primitiveIndices.size());
+            traditionalPrimitive.boundingSphere = GenerateBoundingSphere(primitiveVertices);
+
+            // ===== Meshlet Primitive =====
+            constexpr size_t meshletMaxVertices = 64;
+            constexpr size_t meshletMaxTriangles = 64;
+
+            // build clusters (meshlets) out of the mesh
+            size_t max_meshlets = meshopt_buildMeshletsBound(primitiveIndices.size(), meshletMaxVertices, meshletMaxTriangles);
+            std::vector<meshopt_Meshlet> meshlets(max_meshlets);
+            std::vector<unsigned int> meshletVertices(primitiveIndices.size());
+            std::vector<unsigned char> meshletTriangles(primitiveIndices.size());
+
+            std::vector<uint32_t> primitiveVertexPositions;
+            meshlets.resize(meshopt_buildMeshlets(&meshlets[0], &meshletVertices[0], &meshletTriangles[0],
+                                                  primitiveIndices.data(), primitiveIndices.size(),
+                                                  reinterpret_cast<const float*>(primitiveVertices.data()), primitiveVertices.size(), sizeof(Renderer::Vertex),
+                                                  meshletMaxVertices, meshletMaxTriangles, 0.f));
+
+            // Optimize each meshlet's micro index buffer/vertex layout individually
+            for (auto& meshlet : meshlets) {
+                meshopt_optimizeMeshlet(&meshletVertices[meshlet.vertex_offset], &meshletTriangles[meshlet.triangle_offset], meshlet.triangle_count, meshlet.vertex_count);
+            }
+
+            // Trim the meshlet data to minimize waste for meshletVertices/meshletTriangles
+            const meshopt_Meshlet& last = meshlets.back();
+            meshletVertices.resize(last.vertex_offset + last.vertex_count);
+            meshletTriangles.resize(last.triangle_offset + last.triangle_count * 3);
+
+
+            // todo: meshlet cone
+            meshletPrimitive.meshletOffset = allMeshlets.size();
+            meshletPrimitive.meshletCount = meshlets.size();
+            meshletPrimitive.boundingSphere = GenerateBoundingSphere(primitiveVertices);
+
+            uint32_t vertexOffset = allVertices.size();
+            uint32_t meshletVertexOffset = allMeshletVertices.size();
+            uint32_t meshletTrianglesOffset = allMeshletTriangles.size();
+
+            allMeshletVertices.insert(allMeshletVertices.end(), meshletVertices.begin(), meshletVertices.end());
+            allMeshletTriangles.insert(allMeshletTriangles.end(), meshletTriangles.begin(), meshletTriangles.end());
+
+            for (meshopt_Meshlet meshlet : meshlets) {
+                allMeshlets.push_back({
+                    .vertexOffset = vertexOffset,
+                    .meshletVerticesOffset = meshletVertexOffset + meshlet.vertex_offset,
+                    .meshletTriangleOffset = meshletTrianglesOffset + meshlet.triangle_offset,
+                    .meshletVerticesCount = meshlet.vertex_count,
+                    .meshletTriangleCount = meshlet.triangle_count,
+                });
+            }
+
+
+            //
+            allVertices.insert(allVertices.end(), primitiveVertices.begin(), primitiveVertices.end());
+            allIndices.insert(allIndices.end(), primitiveIndices.begin(), primitiveIndices.end());
+
+            meshData.primitiveIndices.push_back(traditionalPrimitives.size());
+            traditionalPrimitives.push_back(traditionalPrimitive);
+            meshletPrimitives.push_back(meshletPrimitive);
+        }
+
+        model.meshes.push_back(meshData);
+    }
+
+
+    // ===== Buffer Upload =====
+    // === Used by both ===
+    size_t sizeMaterials = materials.size() * sizeof(Renderer::MaterialProperties);
+    model.materialAllocation = materialBufferAllocator.allocate(sizeMaterials);
+    memcpy(static_cast<char*>(materialBuffer.allocationInfo.pMappedData) + model.materialAllocation.offset, materials.data(), sizeMaterials);
+
+    size_t sizeVertices = allVertices.size() * sizeof(Renderer::Vertex);
+    model.vertexAllocation = vertexBufferAllocator.allocate(sizeVertices);
+    memcpy(static_cast<char*>(megaVertexBuffer.allocationInfo.pMappedData) + model.vertexAllocation.offset, allVertices.data(), sizeVertices);
+
+
+    // Used by traditional
+    // Indices
+    size_t sizeIndices = allIndices.size() * sizeof(uint32_t);
+    model.indexAllocation = indexBufferAllocator.allocate(sizeIndices);
+    memcpy(static_cast<char*>(megaIndexBuffer.allocationInfo.pMappedData) + model.indexAllocation.offset, allIndices.data(), sizeIndices);
+
+    // Primitives
+    uint32_t firstIndexCount = model.indexAllocation.offset / sizeof(uint32_t);
+    uint32_t vertexOffsetCount = model.vertexAllocation.offset / sizeof(Renderer::Vertex);
+    uint32_t materialOffsetCount = model.materialAllocation.offset / sizeof(Renderer::MaterialProperties);
+
+    for (auto& primitive : traditionalPrimitives) {
+        primitive.firstIndex += firstIndexCount;
+        primitive.vertexOffset += static_cast<int32_t>(vertexOffsetCount);
+        if (primitive.materialIndex > 0) {
+            primitive.materialIndex += materialOffsetCount;
+        }
+    }
+
+    size_t sizeTraditionalPrimitives = traditionalPrimitives.size() * sizeof(Renderer::TraditionalPrimitive);
+    model.traditionalPrimitiveAllocation = traditionalPrimitiveBufferAllocator.allocate(sizeTraditionalPrimitives);
+    memcpy(static_cast<char*>(traditionalPrimitiveBuffer.allocationInfo.pMappedData) + model.traditionalPrimitiveAllocation.offset, traditionalPrimitives.data(), sizeTraditionalPrimitives);
+
+
+    // === Used by meshlet ===
+    // Meshlet Vertices
+    size_t sizeMeshletVertices = allMeshletVertices.size() * sizeof(uint32_t);
+    model.meshletVerticesAllocation = meshletVerticesBufferAllocator.allocate(sizeMeshletVertices);
+    memcpy(static_cast<char*>(megaMeshletVerticesBuffer.allocationInfo.pMappedData) + model.meshletVerticesAllocation.offset, allMeshletVertices.data(), sizeMeshletVertices);
+
+    // Meshlet Triangles
+    size_t sizeMeshletTriangles = allMeshletTriangles.size() * sizeof(uint8_t);
+    model.meshletTrianglesAllocation = meshletTrianglesBufferAllocator.allocate(sizeMeshletTriangles);
+    memcpy(static_cast<char*>(megaMeshletTrianglesBuffer.allocationInfo.pMappedData) + model.meshletTrianglesAllocation.offset, allMeshletTriangles.data(), sizeMeshletTriangles);
+
+    // Meshlets
+    uint32_t vertexOffset = model.vertexAllocation.offset / sizeof(Renderer::Vertex);
+    uint32_t meshletVerticesOffset = model.meshletVerticesAllocation.offset / sizeof(uint32_t);
+    uint32_t meshletTriangleOffset = model.meshletTrianglesAllocation.offset / sizeof(uint8_t);
+    for (Renderer::Meshlet& meshlet : allMeshlets) {
+        meshlet.vertexOffset += vertexOffset;
+        meshlet.meshletVerticesOffset += meshletVerticesOffset;
+        meshlet.meshletTriangleOffset += meshletTriangleOffset;
+    }
+
+    size_t sizeMeshlets = allMeshlets.size() * sizeof(Renderer::Meshlet);
+    model.meshletAllocation = meshletBufferAllocator.allocate(sizeMeshlets);
+    memcpy(static_cast<char*>(megaMeshletBuffer.allocationInfo.pMappedData) + model.meshletAllocation.offset, allMeshlets.data(), sizeMeshlets);
+
+    // Primitives
+    uint32_t meshletOffset = model.meshletAllocation.offset / sizeof(Renderer::Meshlet);
+    for (auto& primitive : meshletPrimitives) {
+        primitive.meshletOffset += meshletOffset;
+        primitive.materialIndex += materialOffsetCount;
+    }
+
+    size_t sizePrimitives = meshletPrimitives.size() * sizeof(Renderer::MeshletPrimitive);
+    model.meshletPrimitiveAllocation = meshletPrimitiveBufferAllocator.allocate(sizePrimitives);
+    memcpy(static_cast<char*>(meshletPrimitiveBuffer.allocationInfo.pMappedData) + model.meshletPrimitiveAllocation.offset, meshletPrimitives.data(), sizePrimitives);
+
+    // Offset primitive index once. Should be the same for both.
+    uint32_t primitiveOffsetCount = model.traditionalPrimitiveAllocation.offset / sizeof(Renderer::TraditionalPrimitive);
+    uint32_t meshletOffsetCount = model.meshletPrimitiveAllocation.offset / sizeof(Renderer::MeshletPrimitive);
+    if (primitiveOffsetCount != meshletOffsetCount) {
+        fmt::println("Offsets do not match");
+        exit(1);
+    }
+
+    for (auto& mesh : model.meshes) {
+        for (auto& primitiveIndex : mesh.primitiveIndices) {
+            primitiveIndex += primitiveOffsetCount;
+        }
+    }
+
+    fmt::println("Model Name          : {}", model.name);
+    fmt::println("Model               : {} Vertices, {} Tris, {} Materials", allVertices.size(), allIndices.size() / 3, materials.size());
+    fmt::println("Model (Traditional) : {} primitives", traditionalPrimitives.size());
+    fmt::println("Model (Meshlet)     : {} meshlets across {} primitives", allMeshlets.size(), meshletPrimitives.size());
+    model.indexCount = allIndices.capacity();
+    model.indexOffset = 0;
+    model.vertexOffset = 0;
+    return model;
 }
