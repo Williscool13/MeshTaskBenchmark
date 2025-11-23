@@ -1,0 +1,271 @@
+//
+// Created by William on 2025-10-12.
+//
+
+#include "vk_pipelines.h"
+
+#include <cassert>
+
+#include "vk_helpers.h"
+
+namespace Renderer
+{
+RenderPipelineBuilder::RenderPipelineBuilder()
+{
+    dynamicInfo.pDynamicStates = dynamicStates.data();
+    dynamicInfo.dynamicStateCount = dynamicStates.size();
+    Clear();
+}
+
+VkGraphicsPipelineCreateInfo RenderPipelineBuilder::GeneratePipelineCreateInfo(VkPipelineCreateFlagBits flags)
+{
+    constexpr VkPipelineColorBlendAttachmentState colorBlendAttachment{
+        VK_FALSE,
+        VK_BLEND_FACTOR_ZERO,
+        VK_BLEND_FACTOR_ZERO,
+        VK_BLEND_OP_ADD,
+        VK_BLEND_FACTOR_ZERO,
+        VK_BLEND_FACTOR_ZERO,
+        VK_BLEND_OP_ADD,
+        VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT
+    };
+    if (blendAttachmentStates.empty()) {
+        for (int i = 0; i < colorAttachmentFormats.size(); i++) {
+            blendAttachmentStates.push_back(colorBlendAttachment);
+        }
+    }
+
+    assert(colorAttachmentFormats.size() == blendAttachmentStates.size());
+    colorBlending.pAttachments = blendAttachmentStates.data();
+    colorBlending.attachmentCount = blendAttachmentStates.size();
+
+    VkGraphicsPipelineCreateInfo pipelineInfo = {};
+    pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+    pipelineInfo.stageCount = static_cast<uint32_t>(shaderStages.size());
+    pipelineInfo.pStages = shaderStages.data();
+    pipelineInfo.pNext = &renderInfo; // for pipeline creation w/ dynamic rendering
+    pipelineInfo.pViewportState = &viewportState;
+    pipelineInfo.pVertexInputState = &vertexInputInfo;
+    if (bIsTessellationEnabled) {
+        assert(shaderStages.size() > 3);
+        pipelineInfo.pTessellationState = &tessellation;
+    }
+    pipelineInfo.pInputAssemblyState = &inputAssembly;
+    pipelineInfo.pRasterizationState = &rasterizer;
+    pipelineInfo.pMultisampleState = &multisampling;
+    pipelineInfo.pDepthStencilState = &depthStencil;
+    pipelineInfo.pColorBlendState = &colorBlending;
+    pipelineInfo.layout = pipelineLayout;
+    pipelineInfo.flags = flags;
+    pipelineInfo.pDynamicState = &dynamicInfo;
+
+    return pipelineInfo;
+}
+
+void RenderPipelineBuilder::Clear()
+{
+    shaderStages.clear();
+    inputAssembly = {.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
+    rasterizer = {.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
+    multisampling = {.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
+    pipelineLayout = VK_NULL_HANDLE;
+    depthStencil = {.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
+    renderInfo = {.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO};
+    tessellation = {.sType = VK_STRUCTURE_TYPE_PIPELINE_TESSELLATION_STATE_CREATE_INFO};
+
+    colorBlending = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+        .pNext = nullptr,
+        .logicOpEnable = VK_FALSE,
+        .logicOp = VK_LOGIC_OP_COPY,
+        .attachmentCount = 0,
+    };
+
+    vertexInputInfo = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+        .pNext = nullptr,
+        .flags = 0,
+        .vertexBindingDescriptionCount = 0,
+        .pVertexBindingDescriptions = nullptr,
+        .vertexAttributeDescriptionCount = 0,
+        .pVertexAttributeDescriptions = nullptr,
+    };
+
+    dynamicStates = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
+    dynamicInfo = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
+        .pNext = nullptr,
+        .flags = 0,
+        .dynamicStateCount = 0,
+        .pDynamicStates = nullptr,
+    };
+    dynamicInfo.pDynamicStates = dynamicStates.data();
+    dynamicInfo.dynamicStateCount = dynamicStates.size();
+
+
+    vertexBindings.clear();
+    vertexAttributes.clear();
+    colorAttachmentFormats.clear();
+    colorAttachmentFormats.clear();
+    bIsTessellationEnabled = false;
+    tessellation = {};
+}
+
+void RenderPipelineBuilder::SetShaders(VkShaderModule vertexShader)
+{
+    shaderStages.clear();
+    shaderStages.push_back(VkHelpers::PipelineShaderStageCreateInfo(vertexShader, VK_SHADER_STAGE_VERTEX_BIT));
+}
+
+void RenderPipelineBuilder::SetShaders(VkShaderModule vertexShader, VkShaderModule fragmentShader)
+{
+    shaderStages.clear();
+    shaderStages.push_back(VkHelpers::PipelineShaderStageCreateInfo(vertexShader, VK_SHADER_STAGE_VERTEX_BIT));
+    shaderStages.push_back(VkHelpers::PipelineShaderStageCreateInfo(fragmentShader, VK_SHADER_STAGE_FRAGMENT_BIT));
+}
+
+void RenderPipelineBuilder::SetShaders(VkShaderModule vertexShader, VkShaderModule tessControlShader, VkShaderModule tessEvalShader, VkShaderModule fragmentShader)
+{
+    shaderStages.clear();
+
+    shaderStages.push_back(VkHelpers::PipelineShaderStageCreateInfo(vertexShader, VK_SHADER_STAGE_VERTEX_BIT));
+    shaderStages.push_back(VkHelpers::PipelineShaderStageCreateInfo(tessControlShader, VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT));
+    shaderStages.push_back(VkHelpers::PipelineShaderStageCreateInfo(tessEvalShader, VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT));
+    shaderStages.push_back(VkHelpers::PipelineShaderStageCreateInfo(fragmentShader, VK_SHADER_STAGE_FRAGMENT_BIT));
+}
+
+void RenderPipelineBuilder::SetTaskMeshShaders(VkShaderModule taskShader, VkShaderModule meshShader, VkShaderModule fragmentShader)
+{
+    shaderStages.clear();
+    shaderStages.push_back(VkHelpers::PipelineShaderStageCreateInfo(taskShader, VK_SHADER_STAGE_TASK_BIT_EXT));
+    shaderStages.push_back(VkHelpers::PipelineShaderStageCreateInfo(meshShader, VK_SHADER_STAGE_MESH_BIT_EXT));
+    shaderStages.push_back(VkHelpers::PipelineShaderStageCreateInfo( fragmentShader, VK_SHADER_STAGE_FRAGMENT_BIT));
+}
+
+void RenderPipelineBuilder::SetupVertexInput(const std::vector<VkVertexInputBindingDescription>& bindings, const std::vector<VkVertexInputAttributeDescription>& attributes)
+{
+    this->vertexBindings = bindings;
+    this->vertexAttributes = attributes;
+
+    if (!vertexAttributes.empty()) {
+        vertexInputInfo.pVertexAttributeDescriptions = vertexAttributes.data();
+        vertexInputInfo.vertexAttributeDescriptionCount = vertexAttributes.size();
+    }
+    if (!vertexBindings.empty()) {
+        vertexInputInfo.pVertexBindingDescriptions = vertexBindings.data();
+        vertexInputInfo.vertexBindingDescriptionCount = vertexBindings.size();
+    }
+}
+
+void RenderPipelineBuilder::SetupInputAssembly(const VkPrimitiveTopology topology, const bool enablePrimitiveRestart)
+{
+    inputAssembly.topology = topology;
+    inputAssembly.primitiveRestartEnable = enablePrimitiveRestart;
+}
+
+void RenderPipelineBuilder::SetupRasterization(const VkPolygonMode polygonMode, const VkCullModeFlags cullMode, const VkFrontFace frontFace, const float lineWidth, const bool rasterizerDiscardEnable)
+{
+    // Draw Mode
+    rasterizer.polygonMode = polygonMode;
+    rasterizer.lineWidth = lineWidth;
+
+    // Culling
+    rasterizer.cullMode = cullMode;
+    rasterizer.frontFace = frontFace;
+
+    rasterizer.rasterizerDiscardEnable = rasterizerDiscardEnable;
+}
+
+void RenderPipelineBuilder::EnableDepthBias(const float depthBiasConstantFactor, const float depthBiasClamp, const float depthBiasSlopeFactor)
+{
+    rasterizer.depthBiasEnable = true;
+    rasterizer.depthBiasConstantFactor = depthBiasConstantFactor;
+    rasterizer.depthBiasClamp = depthBiasClamp;
+    rasterizer.depthBiasSlopeFactor = depthBiasSlopeFactor;
+}
+
+void RenderPipelineBuilder::SetupMultisampling(const VkBool32 sampleShadingEnable, const VkSampleCountFlagBits rasterizationSamples,
+                                               const float minSampleShading, const VkSampleMask* pSampleMask, const VkBool32 alphaToCoverageEnable,
+                                               const VkBool32 alphaToOneEnable)
+{
+    multisampling.sampleShadingEnable = sampleShadingEnable;
+
+    multisampling.rasterizationSamples = rasterizationSamples;
+    multisampling.minSampleShading = minSampleShading;
+    multisampling.pSampleMask = pSampleMask;
+    // A2C
+    multisampling.alphaToCoverageEnable = alphaToCoverageEnable;
+    multisampling.alphaToOneEnable = alphaToOneEnable;
+}
+
+void RenderPipelineBuilder::DisableMultisampling()
+{
+    SetupMultisampling(VK_FALSE, VK_SAMPLE_COUNT_1_BIT, 1.0f, nullptr, VK_FALSE, VK_FALSE);
+}
+
+void RenderPipelineBuilder::SetupRenderer(const std::vector<VkFormat>& colorAttachmentFormat, const VkFormat depthAttachmentFormat, const VkFormat stencilAttachmentFormat)
+{
+    // Color Format
+    if (!colorAttachmentFormat.empty()) {
+        colorAttachmentFormats = colorAttachmentFormat;
+        renderInfo.colorAttachmentCount = colorAttachmentFormats.size();
+        renderInfo.pColorAttachmentFormats = colorAttachmentFormats.data();
+    }
+
+    // Depth Format
+    renderInfo.depthAttachmentFormat = depthAttachmentFormat;
+
+
+    // Stencil Format
+    renderInfo.stencilAttachmentFormat = stencilAttachmentFormat;
+}
+
+void RenderPipelineBuilder::SetupDepthStencil(const VkBool32 depthTestEnable, const VkBool32 depthWriteEnable, const VkCompareOp compareOp,
+                                              const VkBool32 depthBoundsTestEnable, const VkBool32 stencilTestEnable, const VkStencilOpState& front,
+                                              const VkStencilOpState& back, const float minDepthBounds, const float maxDepthBounds)
+{
+    depthStencil.depthTestEnable = depthTestEnable;
+    depthStencil.depthWriteEnable = depthWriteEnable;
+    depthStencil.depthCompareOp = compareOp;
+    depthStencil.depthBoundsTestEnable = depthBoundsTestEnable;
+    depthStencil.stencilTestEnable = stencilTestEnable;
+    depthStencil.front = front;
+    depthStencil.back = back;
+    depthStencil.minDepthBounds = minDepthBounds;
+    depthStencil.maxDepthBounds = maxDepthBounds;
+}
+
+void RenderPipelineBuilder::EnableDepthTest(const VkBool32 depthWriteEnable, const VkCompareOp op)
+{
+    SetupDepthStencil(VK_TRUE, depthWriteEnable, op,VK_FALSE, VK_FALSE, {}, {}, 0.0f, 1.0f);
+}
+
+void RenderPipelineBuilder::DisableDepthTest()
+{
+    SetupDepthStencil(VK_FALSE, VK_FALSE, VK_COMPARE_OP_NEVER,VK_FALSE, VK_FALSE, {}, {}, 0.0f, 1.0f);
+}
+
+void RenderPipelineBuilder::SetupBlending(const std::vector<VkPipelineColorBlendAttachmentState>& blendAttachmentStates_)
+{
+    this->blendAttachmentStates = blendAttachmentStates_;
+}
+
+void RenderPipelineBuilder::SetupPipelineLayout(VkPipelineLayout pipelineLayout_)
+{
+    this->pipelineLayout = pipelineLayout_;
+}
+
+void RenderPipelineBuilder::SetupTessellation(const int32_t controlPoints)
+{
+    bIsTessellationEnabled = true;
+    tessellation.sType = VK_STRUCTURE_TYPE_PIPELINE_TESSELLATION_STATE_CREATE_INFO;
+    tessellation.patchControlPoints = controlPoints;
+}
+
+void RenderPipelineBuilder::AddDynamicState(const VkDynamicState dynamicState)
+{
+    dynamicStates.push_back(dynamicState);
+    dynamicInfo.pDynamicStates = dynamicStates.data();
+    dynamicInfo.dynamicStateCount = dynamicStates.size();
+}
+}

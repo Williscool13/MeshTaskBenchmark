@@ -2,7 +2,10 @@ cmake_minimum_required(VERSION 4.0)
 project(MeshTaskBenchmark)
 
 set(CMAKE_CXX_STANDARD 20)
+add_definitions(-DGLM_FORCE_DEPTH_ZERO_TO_ONE)
+add_definitions(-DVK_NO_PROTOTYPES)
 
+############## Dependencies ##############
 add_subdirectory(extern/fmt)
 add_subdirectory(extern/SDL EXCLUDE_FROM_ALL)
 set(VOLK_STATIC_DEFINES VK_USE_PLATFORM_WIN32_KHR)
@@ -12,9 +15,14 @@ add_subdirectory(extern/vk-bootstrap)
 add_subdirectory(extern/fastgltf)
 add_subdirectory(extern/OffsetAllocator)
 add_subdirectory(extern/meshoptimizer)
+###########################################
 
-add_subdirectory(src/render)
-add_subdirectory(src/input)
+############## Internal Libs ##############
+add_subdirectory(src/core)   # core-lib
+add_subdirectory(src/game)   # game-lib
+add_subdirectory(src/render) # render-lib
+add_subdirectory(src/input)  # input-lib
+###########################################
 
 add_executable(meshTaskBenchmark
         main.cpp
@@ -33,6 +41,8 @@ target_include_directories(meshTaskBenchmark PUBLIC
 
 target_link_libraries(meshTaskBenchmark PUBLIC
         engine-common
+        core-lib
+        game-lib
         render-lib
         input-lib
 )
@@ -42,6 +52,12 @@ add_custom_command(TARGET meshTaskBenchmark POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
         $<TARGET_FILE:SDL3::SDL3>
         $<TARGET_FILE_DIR:meshTaskBenchmark>
+)
+
+compile_shaders(meshTaskBenchmark
+        ${CMAKE_SOURCE_DIR}/shaders/basicMeshShader.slang task taskMain
+        ${CMAKE_SOURCE_DIR}/shaders/basicMeshShader.slang mesh meshMain
+        ${CMAKE_SOURCE_DIR}/shaders/basicMeshShader.slang fragment fragmentMain
 )
 
 
@@ -55,6 +71,7 @@ target_compile_definitions(engine-common PUBLIC
 )
 
 target_include_directories(engine-common PUBLIC
+        ${CMAKE_SOURCE_DIR}/src
         ${CMAKE_SOURCE_DIR}/extern
 )
 
@@ -62,10 +79,3 @@ target_link_libraries(engine-common PUBLIC
         fmt::fmt
 )
 ###########################################
-
-
-
-#compile_shaders(template
-#        ${CMAKE_SOURCE_DIR}/shaders/render2.slang vertex vertexMain
-#        ${CMAKE_SOURCE_DIR}/shaders/render2.slang fragment fragmentMain
-#)

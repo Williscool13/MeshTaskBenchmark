@@ -2,6 +2,28 @@
 add_library(render-lib STATIC
         vk_context.cpp
         vk_context.h
+        render_targets.cpp
+        render_targets.h
+        vk_swapchain.cpp
+        vk_swapchain.h
+        vk_synchronization.cpp
+        vk_synchronization.h
+        vk_pipelines.cpp
+        vk_pipelines.h
+        vk_resources.cpp
+        vk_resources.h
+        vk_helpers.cpp
+        vk_helpers.h
+        vk_types.cpp
+        vk_types.h
+
+        render_constants.cpp
+        render_constants.h
+        render_utils.cpp
+        render_utils.h
+
+        pipelines/basic_mesh_shader_pipeline.cpp
+        pipelines/basic_mesh_shader_pipeline.h
 )
 
 target_link_libraries(render-lib PUBLIC
