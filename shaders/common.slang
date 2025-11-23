@@ -18,8 +18,8 @@ public struct Model
 
 public struct TraditionalPrimitive {
     public uint firstIndex;
-    public int vertexOffset;
     public uint indexCount;
+    public int vertexOffset;
     public uint materialIndex;
     public float4 boundingSphere;  // xyz = center, w = radius
 };
@@ -91,6 +91,12 @@ public struct MaterialProperties
     public float4 physicalProperties; // x: IOR, y: dispersion, z: normal scale, w: occlusion strength
 };
 
+public struct Frustum
+{
+    public float4 planes[6];
+};
+
+
 public struct SceneData
 {
     public float4x4 view;
@@ -115,6 +121,8 @@ public struct SceneData
 
     public float4 cameraWorldPos;
     public float4 prevCameraWorldPos;
+
+    public Frustum frustum;
 
     public float2 renderTargetSize;
     float2 texelSize;
@@ -168,13 +176,12 @@ public struct VkDrawIndexedIndirectCommand
 };
 
 public struct IndexedIndirectBuffer {
-    public VkDrawIndexedIndirectCommand[] instances;
-}
-
-public struct IndirectCount
-{
     public Atomic<uint32_t> drawCount;
-};
+    uint32_t padding1;
+    uint32_t padding2;
+    uint32_t padding3;
+    public VkDrawIndexedIndirectCommand[] commands;
+}
 
 public struct MeshIndirectDrawParameters {
     // indirect parameters

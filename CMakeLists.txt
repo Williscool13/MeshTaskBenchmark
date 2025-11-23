@@ -59,6 +59,9 @@ add_custom_command(TARGET meshTaskBenchmark POST_BUILD
 compile_shaders(meshTaskBenchmark
         ${CMAKE_SOURCE_DIR}/shaders/traditional.slang vertex vertexMain
         ${CMAKE_SOURCE_DIR}/shaders/traditional.slang fragment fragmentMain
+        ${CMAKE_SOURCE_DIR}/shaders/indirectTraditional.slang compute computeMain
+        ${CMAKE_SOURCE_DIR}/shaders/indirectTraditional.slang vertex vertexMain
+        ${CMAKE_SOURCE_DIR}/shaders/indirectTraditional.slang fragment fragmentMain
         ${CMAKE_SOURCE_DIR}/shaders/basicMeshShader.slang task taskMain
         ${CMAKE_SOURCE_DIR}/shaders/basicMeshShader.slang mesh meshMain
         ${CMAKE_SOURCE_DIR}/shaders/basicMeshShader.slang fragment fragmentMain

@@ -9,6 +9,7 @@
 #include <SDL3/SDL.h>
 
 #include "offsetAllocator.hpp"
+#include "utils.h"
 #include "core/data-structures/handle_allocator.h"
 #include "game/camera/free_camera.h"
 #include "render/render_constants.h"
@@ -16,6 +17,8 @@
 #include "render/vk_types.h"
 #include "render/model/model_types.h"
 #include "render/pipelines/basic_mesh_shader_pipeline.h"
+#include "render/pipelines/traditional_indirect_compute_pipeline.h"
+#include "render/pipelines/traditional_indirect_render_pipeline.h"
 #include "render/pipelines/traditional_pipeline.h"
 
 namespace Renderer
@@ -51,7 +54,18 @@ public:
 
     glm::vec4 GenerateBoundingSphere(const std::vector<Renderer::Vertex>& vertices);
 
+    void Traditional(uint32_t currentFrameInFlight, std::array<uint32_t, 2> extents, VkCommandBuffer cmd);
 
+    void IndirectTraditional(uint32_t currentFrameInFlight, std::array<uint32_t, 2> extents, VkCommandBuffer cmd);
+
+
+    enum class BenchmarkType
+    {
+        Traditional,
+        IndirectTraditional,
+        Meshlet,
+        IndirectMeshlet,
+    };
 
 private:
     SDL_Window* window{nullptr};
@@ -69,6 +83,8 @@ private:
 
     Renderer::BasicMeshShaderPipeline basicMeshShaderPipeline{};
     Renderer::TraditionalPipeline traditionalPipeline{};
+    Renderer::TraditionalIndirectComputePipeline indirectTraditionalCompute{};
+    Renderer::TraditionalIndirectRenderPipeline indirectTraditionalGraphics{};
 
     Renderer::ModelData bunnyModel{};
 
@@ -84,6 +100,8 @@ private:
     Renderer::AllocatedBuffer traditionalPrimitiveBuffer;
     OffsetAllocator::Allocator traditionalPrimitiveBufferAllocator{sizeof(Renderer::MeshletPrimitive) * Renderer::MEGA_PRIMITIVE_BUFFER_COUNT};
 
+    // Traditional indirect
+    Renderer::AllocatedBuffer traditionalIndirectBuffer;
 
     // Meshlet
     Renderer::AllocatedBuffer megaMeshletVerticesBuffer;
@@ -99,6 +117,10 @@ private:
     Renderer::AllocatedBuffer modelBuffer;
     HandleAllocator<Renderer::Instance, Renderer::BINDLESS_INSTANCE_COUNT> instanceEntryAllocator;
     Renderer::AllocatedBuffer instanceBuffer;
+
+private:
+    Utils::FrameTimeTracker frameTimeTracker{100, 1.5f};
+    std::chrono::steady_clock::time_point lastFrameTime;
 };
 
 

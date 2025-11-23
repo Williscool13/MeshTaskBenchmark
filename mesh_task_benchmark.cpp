@@ -63,6 +63,8 @@ void MeshTaskBenchmark::Initialize()
 
     basicMeshShaderPipeline = Renderer::BasicMeshShaderPipeline(context.get());
     traditionalPipeline = Renderer::TraditionalPipeline(context.get());
+    indirectTraditionalCompute = Renderer::TraditionalIndirectComputePipeline(context.get());
+    indirectTraditionalGraphics = Renderer::TraditionalIndirectRenderPipeline(context.get());
 
     CreateBuffers();
 
@@ -110,24 +112,143 @@ void MeshTaskBenchmark::Run()
     }
 }
 
+void MeshTaskBenchmark::Traditional(uint32_t currentFrameInFlight, std::array<uint32_t, 2> extents, VkCommandBuffer cmd)
+{
+    constexpr VkClearValue colorClear = {.color = {0.0f, 0.1f, 0.2f, 1.0f}};
+    const VkRenderingAttachmentInfo colorAttachment = Renderer::VkHelpers::RenderingAttachmentInfo(renderTargets->drawImageView.handle, &colorClear, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    constexpr VkClearValue depthClear = {.depthStencil = {0.0f, 0u}};
+    const VkRenderingAttachmentInfo depthAttachment = Renderer::VkHelpers::RenderingAttachmentInfo(renderTargets->depthImageView.handle, &depthClear, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL);
+    const VkRenderingInfo renderInfo = Renderer::VkHelpers::RenderingInfo({extents[0], extents[1]}, &colorAttachment, &depthAttachment);
+
+
+    vkCmdBeginRendering(cmd, &renderInfo);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, traditionalPipeline.pipeline.handle);
+
+    VkViewport viewport = Renderer::VkHelpers::GenerateViewport(extents[0], extents[1]);
+    vkCmdSetViewport(cmd, 0, 1, &viewport);
+    VkRect2D scissor = Renderer::VkHelpers::GenerateScissor(extents[0], extents[1]);
+    vkCmdSetScissor(cmd, 0, 1, &scissor);
+
+    Renderer::AllocatedBuffer& currentSceneDataBuffer = sceneDataBuffers[currentFrameInFlight];
+
+    Renderer::TraditionalPipelinePushConstant pushData{
+        .sceneData = currentSceneDataBuffer.address,
+        .materialBuffer = materialBuffer.address,
+        .primitiveBuffer = traditionalPrimitiveBuffer.address,
+        .modelBuffer = modelBuffer.address,
+        .instanceBuffer = instanceBuffer.address,
+    };
+
+    vkCmdPushConstants(cmd, traditionalPipeline.pipelineLayout.handle, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(Renderer::TraditionalPipelinePushConstant), &pushData);
+    constexpr VkDeviceSize vertexOffset = 0;
+    vkCmdBindVertexBuffers(cmd, 0, 1, &megaVertexBuffer.handle, &vertexOffset);
+    vkCmdBindIndexBuffer(cmd, megaIndexBuffer.handle, 0, VK_INDEX_TYPE_UINT32);
+
+    vkCmdDrawIndexed(
+        cmd,
+        bunnyModel.indexCount, // 144,046 triangles * 3
+        125, // instanceCount - all instances
+        bunnyModel.indexOffset,
+        bunnyModel.vertexOffset,
+        0
+    );
+
+    vkCmdEndRendering(cmd);
+}
+
+void MeshTaskBenchmark::IndirectTraditional(uint32_t currentFrameInFlight, std::array<uint32_t, 2> extents, VkCommandBuffer cmd)
+{
+    VkBufferMemoryBarrier2 bufferBarriers[2];
+    bufferBarriers[0] = Renderer::VkHelpers::BufferMemoryBarrier(
+        traditionalIndirectBuffer.handle, 0, sizeof(uint32_t),
+        VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT, VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT,
+        VK_PIPELINE_STAGE_2_CLEAR_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
+    bufferBarriers[1] = Renderer::VkHelpers::BufferMemoryBarrier(
+        traditionalIndirectBuffer.handle, sizeof(glm::vec4), sizeof(VkDrawIndexedIndirectCommand) * 10000,
+        VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT, VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT,
+        VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_WRITE_BIT);
+
+    VkDependencyInfo depInfo{};
+    depInfo.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+    depInfo.pNext = nullptr;
+    depInfo.dependencyFlags = 0;
+    depInfo.bufferMemoryBarrierCount = 2;
+    depInfo.pBufferMemoryBarriers = bufferBarriers;
+    vkCmdPipelineBarrier2(cmd, &depInfo);
+
+    vkCmdFillBuffer(cmd, traditionalIndirectBuffer.handle, 0, sizeof(uint32_t), 0);
+
+    VkBufferMemoryBarrier2 bufferBarrier = Renderer::VkHelpers::BufferMemoryBarrier(
+        traditionalIndirectBuffer.handle, 0, sizeof(uint32_t),
+        VK_PIPELINE_STAGE_2_CLEAR_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+        VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_WRITE_BIT);
+    depInfo.bufferMemoryBarrierCount = 1;
+    depInfo.pBufferMemoryBarriers = &bufferBarrier;
+    vkCmdPipelineBarrier2(cmd, &depInfo);
+
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, indirectTraditionalCompute.drawCullPipeline.handle);
+    Renderer::AllocatedBuffer& currentSceneDataBuffer = sceneDataBuffers[currentFrameInFlight];
+    Renderer::TraditionalIndirectComputePushConstant pushData{
+        .sceneData = currentSceneDataBuffer.address,
+        .primitiveBuffer = traditionalPrimitiveBuffer.address,
+        .modelBuffer = modelBuffer.address,
+        .instanceBuffer = instanceBuffer.address,
+        .indirectBuffer = traditionalIndirectBuffer.address,
+    };
+
+    vkCmdPushConstants(cmd, indirectTraditionalCompute.drawCullPipelineLayout.handle, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(Renderer::TraditionalIndirectComputePushConstant), &pushData);
+    constexpr uint32_t groupsX = (125 + 63) / 64;
+    vkCmdDispatch(cmd, groupsX, 1, 1);
+
+    bufferBarrier = Renderer::VkHelpers::BufferMemoryBarrier(
+        traditionalIndirectBuffer.handle, 0, VK_WHOLE_SIZE,
+        VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_WRITE_BIT,
+        VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT, VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT);
+    depInfo.pBufferMemoryBarriers = &bufferBarrier;
+    vkCmdPipelineBarrier2(cmd, &depInfo);
+
+
+    constexpr VkClearValue colorClear = {.color = {0.2f, 0.1f, 0.0f, 1.0f}};
+    const VkRenderingAttachmentInfo colorAttachment = Renderer::VkHelpers::RenderingAttachmentInfo(renderTargets->drawImageView.handle, &colorClear, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    constexpr VkClearValue depthClear = {.depthStencil = {0.0f, 0u}};
+    const VkRenderingAttachmentInfo depthAttachment = Renderer::VkHelpers::RenderingAttachmentInfo(renderTargets->depthImageView.handle, &depthClear, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL);
+    const VkRenderingInfo renderInfo = Renderer::VkHelpers::RenderingInfo({extents[0], extents[1]}, &colorAttachment, &depthAttachment);
+
+
+    vkCmdBeginRendering(cmd, &renderInfo);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, indirectTraditionalGraphics.pipeline.handle);
+
+    VkViewport viewport = Renderer::VkHelpers::GenerateViewport(extents[0], extents[1]);
+    vkCmdSetViewport(cmd, 0, 1, &viewport);
+    VkRect2D scissor = Renderer::VkHelpers::GenerateScissor(extents[0], extents[1]);
+    vkCmdSetScissor(cmd, 0, 1, &scissor);
+
+    Renderer::TraditionalIndirectRenderPushConstant pushData2{
+        .sceneData = currentSceneDataBuffer.address,
+        .materialBuffer = materialBuffer.address,
+        .primitiveBuffer = traditionalPrimitiveBuffer.address,
+        .modelBuffer = modelBuffer.address,
+        .instanceBuffer = instanceBuffer.address,
+    };
+
+    vkCmdPushConstants(cmd, indirectTraditionalGraphics.pipelineLayout.handle, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(Renderer::TraditionalIndirectRenderPushConstant), &pushData2);
+
+    constexpr VkDeviceSize vertexOffset = 0;
+    vkCmdBindVertexBuffers(cmd, 0, 1, &megaVertexBuffer.handle, &vertexOffset);
+    vkCmdBindIndexBuffer(cmd, megaIndexBuffer.handle, 0, VK_INDEX_TYPE_UINT32);
+    vkCmdDrawIndexedIndirectCount(cmd, traditionalIndirectBuffer.handle, sizeof(glm::vec4), traditionalIndirectBuffer.handle, 0, 1000, sizeof(VkDrawIndexedIndirectCommand));
+    vkCmdEndRendering(cmd);
+}
+
 void MeshTaskBenchmark::Render(uint32_t currentFrameInFlight, Renderer::FrameSynchronization& frameSync)
 {
     VK_CHECK(vkWaitForFences(context->device, 1, &frameSync.renderFence, true, UINT64_MAX));
     VK_CHECK(vkResetFences(context->device, 1, &frameSync.renderFence));
 
-    uint32_t swapchainImageIndex;
-    VkResult e = vkAcquireNextImageKHR(context->device, swapchain->handle, UINT64_MAX, frameSync.swapchainSemaphore, nullptr, &swapchainImageIndex);
-    if (e == VK_ERROR_OUT_OF_DATE_KHR || e == VK_SUBOPTIMAL_KHR) {
-        fmt::println("Swapchain out of date or suboptimal (Acquire)");
-        exit(1);
-        return;
-    }
-
     std::array extents = {swapchain->extent.width, swapchain->extent.height};
 
     const Input& input = Input::Input::Get();
     const float deltaTime = Time::Get().GetDeltaTime();
-    VkImage currentSwapchainImage = swapchain->swapchainImages[swapchainImageIndex];
 
     //
     {
@@ -147,6 +268,7 @@ void MeshTaskBenchmark::Render(uint32_t currentFrameInFlight, Renderer::FrameSyn
         sceneData.view = view;
         sceneData.proj = proj;
         sceneData.viewProj = proj * view;
+        sceneData.frustum = Renderer::Frustum(sceneData.viewProj);
         sceneData.renderTargetSize.x = extents[0];
         sceneData.renderTargetSize.y = extents[1];
         sceneData.deltaTime = deltaTime;
@@ -161,7 +283,6 @@ void MeshTaskBenchmark::Render(uint32_t currentFrameInFlight, Renderer::FrameSyn
     VkCommandBufferBeginInfo commandBufferBeginInfo = Renderer::VkHelpers::CommandBufferBeginInfo();
     VK_CHECK(vkBeginCommandBuffer(cmd, &commandBufferBeginInfo));
 
-
     //
     {
         auto subresource = Renderer::VkHelpers::SubresourceRange(VK_IMAGE_ASPECT_COLOR_BIT);
@@ -175,49 +296,27 @@ void MeshTaskBenchmark::Render(uint32_t currentFrameInFlight, Renderer::FrameSyn
         vkCmdPipelineBarrier2(cmd, &dependencyInfo);
     }
 
-    //
-    {
-        constexpr VkClearValue colorClear = {.color = {0.0f, 0.1f, 0.2f, 1.0f}};
-        const VkRenderingAttachmentInfo colorAttachment = Renderer::VkHelpers::RenderingAttachmentInfo(renderTargets->drawImageView.handle, &colorClear, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
-        constexpr VkClearValue depthClear = {.depthStencil = {0.0f, 0u}};
-        const VkRenderingAttachmentInfo depthAttachment = Renderer::VkHelpers::RenderingAttachmentInfo(renderTargets->depthImageView.handle, &depthClear, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL);
-        const VkRenderingInfo renderInfo = Renderer::VkHelpers::RenderingInfo({extents[0], extents[1]}, &colorAttachment, &depthAttachment);
-
-
-        vkCmdBeginRendering(cmd, &renderInfo);
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, traditionalPipeline.pipeline.handle);
-
-        VkViewport viewport = Renderer::VkHelpers::GenerateViewport(extents[0], extents[1]);
-        vkCmdSetViewport(cmd, 0, 1, &viewport);
-        VkRect2D scissor = Renderer::VkHelpers::GenerateScissor(extents[0], extents[1]);
-        vkCmdSetScissor(cmd, 0, 1, &scissor);
-
-        Renderer::AllocatedBuffer& currentSceneDataBuffer = sceneDataBuffers[currentFrameInFlight];
-
-        Renderer::TraditionalPipelinePushConstant pushData{
-            .sceneData = currentSceneDataBuffer.address,
-            .materialBuffer = materialBuffer.address,
-            .primitiveBuffer = traditionalPrimitiveBuffer.address,
-            .modelBuffer = modelBuffer.address,
-            .instanceBuffer = instanceBuffer.address,
-        };
-
-        vkCmdPushConstants(cmd, traditionalPipeline.pipelineLayout.handle, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(Renderer::TraditionalPipelinePushConstant), &pushData);
-        constexpr VkDeviceSize vertexOffset = 0;
-        vkCmdBindVertexBuffers(cmd, 0, 1, &megaVertexBuffer.handle, &vertexOffset);
-        vkCmdBindIndexBuffer(cmd, megaIndexBuffer.handle, 0, VK_INDEX_TYPE_UINT32);
-
-        vkCmdDrawIndexed(
-            cmd,
-            bunnyModel.indexCount, // 144,046 triangles * 3
-            125, // instanceCount - all instances
-            bunnyModel.indexOffset,
-            bunnyModel.vertexOffset,
-            0
-        );
-
-        vkCmdEndRendering(cmd);
+    constexpr auto benchmarkType = BenchmarkType::IndirectTraditional;
+    switch (benchmarkType) {
+        case BenchmarkType::Traditional:
+            Traditional(currentFrameInFlight, extents, cmd);
+            break;
+        case BenchmarkType::IndirectTraditional:
+            IndirectTraditional(currentFrameInFlight, extents, cmd);
+            break;
+        default:
+            break;
     }
+
+    uint32_t swapchainImageIndex;
+
+    VkResult e = vkAcquireNextImageKHR(context->device, swapchain->handle, UINT64_MAX, frameSync.swapchainSemaphore, nullptr, &swapchainImageIndex);
+    if (e == VK_ERROR_OUT_OF_DATE_KHR || e == VK_SUBOPTIMAL_KHR) {
+        fmt::println("Swapchain out of date or suboptimal (Acquire)");
+        exit(1);
+        return;
+    }
+    VkImage currentSwapchainImage = swapchain->swapchainImages[swapchainImageIndex];
 
     // Prepare for copy
     {
@@ -293,7 +392,7 @@ void MeshTaskBenchmark::Render(uint32_t currentFrameInFlight, Renderer::FrameSyn
     // Wait for swapchain semaphore, then submit command buffer. When finished, signal render semaphore and render fence.
     VK_CHECK(vkQueueSubmit2(context->graphicsQueue, 1, &submitInfo, frameSync.renderFence));
 
-    // Wait for render semaphore, then present frame.
+
     VkPresentInfoKHR presentInfo = Renderer::VkHelpers::PresentInfo(&swapchain->handle, nullptr, &swapchainImageIndex);
     presentInfo.pWaitSemaphores = &frameSync.renderSemaphore;
     const VkResult presentResult = vkQueuePresentKHR(context->graphicsQueue, &presentInfo);
@@ -356,6 +455,13 @@ void MeshTaskBenchmark::CreateBuffers()
     modelBuffer = Renderer::VkResources::CreateAllocatedBuffer(context.get(), bufferInfo, vmaAllocInfo);
     bufferInfo.size = sizeof(Renderer::Instance) * Renderer::BINDLESS_INSTANCE_COUNT;
     instanceBuffer = Renderer::VkResources::CreateAllocatedBuffer(context.get(), bufferInfo, vmaAllocInfo);
+
+    vmaAllocInfo.flags = 0;
+    vmaAllocInfo.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+    vmaAllocInfo.requiredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+    bufferInfo.usage = VK_BUFFER_USAGE_2_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_2_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_2_TRANSFER_DST_BIT;
+    bufferInfo.size = sizeof(glm::vec4) + sizeof(VkDrawIndexedIndirectCommand) * Renderer::BINDLESS_INSTANCE_COUNT;
+    traditionalIndirectBuffer = Renderer::VkResources::CreateAllocatedBuffer(context.get(), bufferInfo, vmaAllocInfo);
 }
 
 void MeshTaskBenchmark::InstanceGeneration()
@@ -376,10 +482,10 @@ void MeshTaskBenchmark::InstanceGeneration()
             for (int z = 0; z < gridSize; z++) {
                 glm::mat4 mat{1.0f};
                 mat = glm::translate(mat, glm::vec3(
-                    x * spacing - (gridSize * spacing) / 2.0f,
-                    y * spacing - (gridSize * spacing) / 2.0f,
-                    z * spacing - (gridSize * spacing) / 2.0f
-                ));
+                                         x * spacing - (gridSize * spacing) / 2.0f,
+                                         y * spacing - (gridSize * spacing) / 2.0f,
+                                         z * spacing - (gridSize * spacing) / 2.0f
+                                     ));
                 mat = mat * bunnyCorrection;
 
                 models.push_back(Renderer::Model{mat});
