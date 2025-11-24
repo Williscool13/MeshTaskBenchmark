@@ -30,7 +30,7 @@ public:
     [[nodiscard]] float GetTime() const;
 
 private:
-    uint64_t deltaTime;
+    uint64_t deltaTime{};
     std::chrono::time_point<std::chrono::steady_clock> lastTime;
 };
 } // Core

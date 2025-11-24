@@ -13,7 +13,6 @@
 
 namespace Renderer
 {
-
 enum class MaterialType
 {
     OPAQUE_ = 0,
@@ -78,15 +77,20 @@ struct MeshletPrimitive
 
 struct Meshlet
 {
+    glm::vec4 meshletBoundingSphere;
+
+    glm::vec3 coneApex;
+    float coneCutoff;
+
+    glm::vec3 coneAxis;
     uint32_t vertexOffset;
+
     uint32_t meshletVerticesOffset;
     uint32_t meshletTriangleOffset;
     uint32_t meshletVerticesCount;
     uint32_t meshletTriangleCount;
-    uint32_t padding1{0};
-    uint32_t padding2{0};
-    uint32_t padding3{0};
 };
+
 
 struct Instance
 {
@@ -106,11 +110,11 @@ struct Model
 
 struct TraditionalIndirectDrawParameters
 {
-    uint32_t    indexCount;
-    uint32_t    instanceCount;
-    uint32_t    firstIndex;
-    int32_t     vertexOffset;
-    uint32_t    firstInstance;
+    uint32_t indexCount;
+    uint32_t instanceCount;
+    uint32_t firstIndex;
+    int32_t vertexOffset;
+    uint32_t firstInstance;
 };
 
 
@@ -143,6 +147,8 @@ struct ModelData
     uint32_t indexOffset{};
     uint32_t vertexOffset{};
 
+    uint32_t meshletCount{};
+
     std::vector<MeshInformation> meshes{};
 
     OffsetAllocator::Allocation vertexAllocation{};
@@ -170,7 +176,6 @@ struct ModelData
 
     ModelData& operator=(ModelData&&) noexcept = default;
 };
-
 } // Renderer
 
 #endif //MESHTASKBENCHMARK_MODEL_TYPES_H

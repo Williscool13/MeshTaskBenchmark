@@ -16,7 +16,7 @@
 #include "render/vk_resources.h"
 #include "render/vk_types.h"
 #include "render/model/model_types.h"
-#include "render/pipelines/basic_mesh_shader_pipeline.h"
+#include "render/pipelines/task_mesh_pipeline.h"
 #include "render/pipelines/traditional_indirect_compute_pipeline.h"
 #include "render/pipelines/traditional_indirect_render_pipeline.h"
 #include "render/pipelines/traditional_pipeline.h"
@@ -58,6 +58,8 @@ public:
 
     void IndirectTraditional(uint32_t currentFrameInFlight, std::array<uint32_t, 2> extents, VkCommandBuffer cmd);
 
+    void Meshlet(uint32_t currentFrameInFlight, std::array<uint32_t, 2> extents, VkCommandBuffer cmd);
+
 
     enum class BenchmarkType
     {
@@ -81,10 +83,10 @@ private:
     Renderer::SceneData sceneData{};
     std::vector<Renderer::AllocatedBuffer> sceneDataBuffers;
 
-    Renderer::BasicMeshShaderPipeline basicMeshShaderPipeline{};
     Renderer::TraditionalPipeline traditionalPipeline{};
     Renderer::TraditionalIndirectComputePipeline indirectTraditionalCompute{};
     Renderer::TraditionalIndirectRenderPipeline indirectTraditionalGraphics{};
+    Renderer::TaskMeshPipeline taskMeshPipeline{};
 
     Renderer::ModelData bunnyModel{};
 

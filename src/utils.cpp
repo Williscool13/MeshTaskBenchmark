@@ -52,19 +52,17 @@ float FrameTimeTracker::GetPercentile(float percentile) const
 {
     if (sampleCount == 0) return 0.0f;
 
-    // Copy current samples into a vector and sort
     std::vector<float> sorted;
-    size_t count = std::min(sampleCount, historySize);
+    const size_t count = std::min(sampleCount, historySize);
     sorted.reserve(count);
 
     for (size_t i = 0; i < count; i++) {
         sorted.push_back(history[i]);
     }
 
-    std::sort(sorted.begin(), sorted.end());
+    std::ranges::sort(sorted);
 
-    size_t index = static_cast<size_t>(percentile * (sorted.size() - 1));
+    const auto index = static_cast<size_t>(percentile * (static_cast<float>(sorted.size()) - 1));
     return sorted[index];
 }
-
 }

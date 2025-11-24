@@ -61,10 +61,10 @@ void MeshTaskBenchmark::Initialize()
         frameSynchronization[i].Initialize();
     }
 
-    basicMeshShaderPipeline = Renderer::BasicMeshShaderPipeline(context.get());
     traditionalPipeline = Renderer::TraditionalPipeline(context.get());
     indirectTraditionalCompute = Renderer::TraditionalIndirectComputePipeline(context.get());
     indirectTraditionalGraphics = Renderer::TraditionalIndirectRenderPipeline(context.get());
+    taskMeshPipeline = Renderer::TaskMeshPipeline(context.get());
 
     CreateBuffers();
 
@@ -231,12 +231,52 @@ void MeshTaskBenchmark::IndirectTraditional(uint32_t currentFrameInFlight, std::
         .instanceBuffer = instanceBuffer.address,
     };
 
-    vkCmdPushConstants(cmd, indirectTraditionalGraphics.pipelineLayout.handle, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(Renderer::TraditionalIndirectRenderPushConstant), &pushData2);
+    vkCmdPushConstants(cmd, indirectTraditionalGraphics.pipelineLayout.handle, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(Renderer::TraditionalIndirectRenderPushConstant),
+                       &pushData2);
 
     constexpr VkDeviceSize vertexOffset = 0;
     vkCmdBindVertexBuffers(cmd, 0, 1, &megaVertexBuffer.handle, &vertexOffset);
     vkCmdBindIndexBuffer(cmd, megaIndexBuffer.handle, 0, VK_INDEX_TYPE_UINT32);
     vkCmdDrawIndexedIndirectCount(cmd, traditionalIndirectBuffer.handle, sizeof(glm::vec4), traditionalIndirectBuffer.handle, 0, 1000, sizeof(VkDrawIndexedIndirectCommand));
+    vkCmdEndRendering(cmd);
+}
+
+void MeshTaskBenchmark::Meshlet(uint32_t currentFrameInFlight, std::array<uint32_t, 2> extents, VkCommandBuffer cmd)
+{
+    constexpr VkClearValue colorClear = {.color = {0.0f, 0.2f, 0.1f, 1.0f}};
+    const VkRenderingAttachmentInfo colorAttachment = Renderer::VkHelpers::RenderingAttachmentInfo(renderTargets->drawImageView.handle, &colorClear, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    constexpr VkClearValue depthClear = {.depthStencil = {0.0f, 0u}};
+    const VkRenderingAttachmentInfo depthAttachment = Renderer::VkHelpers::RenderingAttachmentInfo(renderTargets->depthImageView.handle, &depthClear, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL);
+    const VkRenderingInfo renderInfo = Renderer::VkHelpers::RenderingInfo({extents[0], extents[1]}, &colorAttachment, &depthAttachment);
+
+
+    vkCmdBeginRendering(cmd, &renderInfo);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, taskMeshPipeline.pipeline.handle);
+
+    VkViewport viewport = Renderer::VkHelpers::GenerateViewport(extents[0], extents[1]);
+    vkCmdSetViewport(cmd, 0, 1, &viewport);
+    VkRect2D scissor = Renderer::VkHelpers::GenerateScissor(extents[0], extents[1]);
+    vkCmdSetScissor(cmd, 0, 1, &scissor);
+
+    Renderer::AllocatedBuffer& currentSceneDataBuffer = sceneDataBuffers[currentFrameInFlight];
+    Renderer::TaskMeshPushConstant pushConstants{
+        .sceneData = currentSceneDataBuffer.address,
+        .vertexBuffer = megaVertexBuffer.address,
+        .primitiveBuffer = meshletPrimitiveBuffer.address,
+        .meshletVerticesBuffer = megaMeshletVerticesBuffer.address,
+        .meshletTrianglesBuffer = megaMeshletTrianglesBuffer.address,
+        .meshletBuffer = megaMeshletBuffer.address,
+        .materialBuffer = materialBuffer.address,
+        .modelBuffer = modelBuffer.address,
+        .instanceBuffer = instanceBuffer.address,
+    };
+
+    vkCmdPushConstants(cmd, taskMeshPipeline.pipelineLayout.handle, VK_SHADER_STAGE_TASK_BIT_EXT | VK_SHADER_STAGE_MESH_BIT_EXT | VK_SHADER_STAGE_FRAGMENT_BIT, 0,
+                       sizeof(Renderer::TaskMeshPushConstant), &pushConstants);
+    //vkCmdPushConstants(cmd, basicMeshShaderPipeline.pipelineLayout.handle, VK_SHADER_STAGE_TASK_BIT_EXT | VK_SHADER_STAGE_MESH_BIT_EXT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(Renderer::BasicMeshShaderPushConstants), &pushData);
+
+    uint32_t numChunks = (bunnyModel.meshletCount + (64 - 1)) / 64;
+    vkCmdDrawMeshTasksEXT(cmd, numChunks, 125, 1);
     vkCmdEndRendering(cmd);
 }
 
@@ -269,6 +309,7 @@ void MeshTaskBenchmark::Render(uint32_t currentFrameInFlight, Renderer::FrameSyn
         sceneData.proj = proj;
         sceneData.viewProj = proj * view;
         sceneData.frustum = Renderer::Frustum(sceneData.viewProj);
+        sceneData.cameraWorldPos = {freeCamera.transform.translation, 0.0f};
         sceneData.renderTargetSize.x = extents[0];
         sceneData.renderTargetSize.y = extents[1];
         sceneData.deltaTime = deltaTime;
@@ -296,13 +337,16 @@ void MeshTaskBenchmark::Render(uint32_t currentFrameInFlight, Renderer::FrameSyn
         vkCmdPipelineBarrier2(cmd, &dependencyInfo);
     }
 
-    constexpr auto benchmarkType = BenchmarkType::IndirectTraditional;
+    constexpr auto benchmarkType = BenchmarkType::Meshlet;
     switch (benchmarkType) {
         case BenchmarkType::Traditional:
             Traditional(currentFrameInFlight, extents, cmd);
             break;
         case BenchmarkType::IndirectTraditional:
             IndirectTraditional(currentFrameInFlight, extents, cmd);
+            break;
+        case BenchmarkType::Meshlet:
+            Meshlet(currentFrameInFlight, extents, cmd);
             break;
         default:
             break;
@@ -739,9 +783,27 @@ Renderer::ModelData MeshTaskBenchmark::LoadModel(const std::filesystem::path& pa
             allMeshletVertices.insert(allMeshletVertices.end(), meshletVertices.begin(), meshletVertices.end());
             allMeshletTriangles.insert(allMeshletTriangles.end(), meshletTriangles.begin(), meshletTriangles.end());
 
-            for (meshopt_Meshlet meshlet : meshlets) {
+            for (meshopt_Meshlet& meshlet : meshlets) {
+                meshopt_Bounds bounds = meshopt_computeMeshletBounds(
+                    &meshletVertices[meshlet.vertex_offset],
+                    &meshletTriangles[meshlet.triangle_offset],
+                    meshlet.triangle_count,
+                    reinterpret_cast<const float*>(primitiveVertices.data()),
+                    primitiveVertices.size(),
+                    sizeof(Renderer::Vertex)
+                );
+
                 allMeshlets.push_back({
+                    .meshletBoundingSphere = glm::vec4(
+                        bounds.center[0], bounds.center[1], bounds.center[2],
+                        bounds.radius
+                    ),
+                    .coneApex = glm::vec3(bounds.cone_apex[0], bounds.cone_apex[1], bounds.cone_apex[2]),
+                    .coneCutoff = bounds.cone_cutoff,
+
+                    .coneAxis = glm::vec3(bounds.cone_axis[0], bounds.cone_axis[1], bounds.cone_axis[2]),
                     .vertexOffset = vertexOffset,
+
                     .meshletVerticesOffset = meshletVertexOffset + meshlet.vertex_offset,
                     .meshletTriangleOffset = meshletTrianglesOffset + meshlet.triangle_offset,
                     .meshletVerticesCount = meshlet.vertex_count,
@@ -827,7 +889,9 @@ Renderer::ModelData MeshTaskBenchmark::LoadModel(const std::filesystem::path& pa
     uint32_t meshletOffset = model.meshletAllocation.offset / sizeof(Renderer::Meshlet);
     for (auto& primitive : meshletPrimitives) {
         primitive.meshletOffset += meshletOffset;
-        primitive.materialIndex += materialOffsetCount;
+        if (primitive.materialIndex > 0) {
+            primitive.materialIndex += materialOffsetCount;
+        }
     }
 
     size_t sizePrimitives = meshletPrimitives.size() * sizeof(Renderer::MeshletPrimitive);
@@ -855,5 +919,6 @@ Renderer::ModelData MeshTaskBenchmark::LoadModel(const std::filesystem::path& pa
     model.indexCount = allIndices.capacity();
     model.indexOffset = 0;
     model.vertexOffset = 0;
+    model.meshletCount = allMeshlets.size();
     return model;
 }

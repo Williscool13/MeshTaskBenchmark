@@ -56,14 +56,15 @@ public struct MeshletPrimitive
 
 public struct Meshlet
 {
+    public float4 meshletBoundingSphere;
+    public float3 coneApex;
+    public float coneCutoff;
+    public float3 coneAxis;
     public uint32_t vertexOffset;
     public uint32_t meshletVerticesOffset;
     public uint32_t meshletTriangleOffset;
     public uint32_t meshletVerticesCount;
     public uint32_t meshletTriangleCount;
-    uint32_t padding1;
-    uint32_t padding2;
-    uint32_t padding3;
 };
 
 public struct MaterialProperties
