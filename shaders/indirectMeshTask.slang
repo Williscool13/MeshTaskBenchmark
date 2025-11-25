@@ -246,6 +246,6 @@ FragmentOutput fragmentMain(VertexOutput input, uniform PushConsts pushConstants
 
         FragmentOutput output;
         output.color = float4(ambient + diffuse, material.colorFactor.a);
-
+        // output.color = float4(input.color.xyz, 1.0f);
         return output;
 }

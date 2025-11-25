@@ -105,7 +105,7 @@ void MeshTaskBenchmark::Run()
         time.Update();
 
         const float deltaTime = Time::Get().GetDeltaTime();
-        // freeCamera.Update(deltaTime);
+        freeCamera.Update(deltaTime);
 
         if (input.IsKeyPressed(Key::NUM_1)) {
             benchmarkType = BenchmarkType::Traditional;
@@ -206,7 +206,7 @@ void MeshTaskBenchmark::IndirectTraditional(uint32_t currentFrameInFlight, std::
         VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT, VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT,
         VK_PIPELINE_STAGE_2_CLEAR_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
     bufferBarriers[1] = Renderer::VkHelpers::BufferMemoryBarrier(
-        traditionalIndirectBuffer.handle, sizeof(glm::vec4), sizeof(VkDrawIndexedIndirectCommand) * 10000,
+        traditionalIndirectBuffer.handle, sizeof(glm::vec4), sizeof(VkDrawIndexedIndirectCommand) * 125,
         VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT, VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT,
         VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_WRITE_BIT);
 
@@ -279,7 +279,7 @@ void MeshTaskBenchmark::IndirectTraditional(uint32_t currentFrameInFlight, std::
     constexpr VkDeviceSize vertexOffset = 0;
     vkCmdBindVertexBuffers(cmd, 0, 1, &megaVertexBuffer.handle, &vertexOffset);
     vkCmdBindIndexBuffer(cmd, megaIndexBuffer.handle, 0, VK_INDEX_TYPE_UINT32);
-    vkCmdDrawIndexedIndirectCount(cmd, traditionalIndirectBuffer.handle, sizeof(glm::vec4), traditionalIndirectBuffer.handle, 0, 1000, sizeof(VkDrawIndexedIndirectCommand));
+    vkCmdDrawIndexedIndirectCount(cmd, traditionalIndirectBuffer.handle, sizeof(glm::vec4), traditionalIndirectBuffer.handle, 0, 125, sizeof(VkDrawIndexedIndirectCommand));
     vkCmdEndRendering(cmd);
 }
 
@@ -906,7 +906,6 @@ Renderer::ModelData MeshTaskBenchmark::LoadModel(const std::filesystem::path& pa
             meshletTriangles.resize(last.triangle_offset + last.triangle_count * 3);
 
 
-            // todo: meshlet cone
             meshletPrimitive.meshletOffset = allMeshlets.size();
             meshletPrimitive.meshletCount = meshlets.size();
             meshletPrimitive.boundingSphere = GenerateBoundingSphere(primitiveVertices);
