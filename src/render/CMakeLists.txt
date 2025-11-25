@@ -32,6 +32,10 @@ add_library(render-lib STATIC
         pipelines/traditional_indirect_render_pipeline.h
         pipelines/task_mesh_pipeline.cpp
         pipelines/task_mesh_pipeline.h
+        pipelines/indirect_task_mesh_compute_pipeline.cpp
+        pipelines/indirect_task_mesh_compute_pipeline.h
+        pipelines/indirect_task_mesh_render_pipeline.cpp
+        pipelines/indirect_task_mesh_render_pipeline.h
 )
 
 target_link_libraries(render-lib PUBLIC

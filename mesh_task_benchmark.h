@@ -16,6 +16,8 @@
 #include "render/vk_resources.h"
 #include "render/vk_types.h"
 #include "render/model/model_types.h"
+#include "render/pipelines/indirect_task_mesh_compute_pipeline.h"
+#include "render/pipelines/indirect_task_mesh_render_pipeline.h"
 #include "render/pipelines/task_mesh_pipeline.h"
 #include "render/pipelines/traditional_indirect_compute_pipeline.h"
 #include "render/pipelines/traditional_indirect_render_pipeline.h"
@@ -60,7 +62,9 @@ public:
 
     void Meshlet(uint32_t currentFrameInFlight, std::array<uint32_t, 2> extents, VkCommandBuffer cmd);
 
+    void IndirectMeshlet(uint32_t currentFrameInFlight, std::array<uint32_t, 2> extents, VkCommandBuffer cmd);
 
+private:
     enum class BenchmarkType
     {
         Traditional,
@@ -68,8 +72,8 @@ public:
         Meshlet,
         IndirectMeshlet,
     };
+    BenchmarkType benchmarkType = BenchmarkType::Traditional;
 
-private:
     SDL_Window* window{nullptr};
     std::unique_ptr<Renderer::VulkanContext> context{};
     std::unique_ptr<Renderer::Swapchain> swapchain;
@@ -87,6 +91,8 @@ private:
     Renderer::TraditionalIndirectComputePipeline indirectTraditionalCompute{};
     Renderer::TraditionalIndirectRenderPipeline indirectTraditionalGraphics{};
     Renderer::TaskMeshPipeline taskMeshPipeline{};
+    Renderer::IndirectTaskMeshComputePipeline indirectTaskMeshCompute{};
+    Renderer::IndirectTaskMeshRenderPipeline indirectTaskMeshGraphics{};
 
     Renderer::ModelData bunnyModel{};
 
@@ -120,9 +126,15 @@ private:
     HandleAllocator<Renderer::Instance, Renderer::BINDLESS_INSTANCE_COUNT> instanceEntryAllocator;
     Renderer::AllocatedBuffer instanceBuffer;
 
+    // Meshlet indirect
+    Renderer::AllocatedBuffer meshletIndirectBuffer;
+
 private:
-    Utils::FrameTimeTracker frameTimeTracker{100, 1.5f};
-    std::chrono::steady_clock::time_point lastFrameTime;
+    float benchmarkTimer = 0.0f;
+    int benchmarkFrameCount = 0;
+    float averageFPS = 0.0f;
+    float fpsDisplayTimer = 0.0f;
+    BenchmarkType lastBenchmarkType = BenchmarkType::Traditional;
 };
 
 

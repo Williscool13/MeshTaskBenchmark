@@ -65,6 +65,8 @@ void MeshTaskBenchmark::Initialize()
     indirectTraditionalCompute = Renderer::TraditionalIndirectComputePipeline(context.get());
     indirectTraditionalGraphics = Renderer::TraditionalIndirectRenderPipeline(context.get());
     taskMeshPipeline = Renderer::TaskMeshPipeline(context.get());
+    indirectTaskMeshCompute = Renderer::IndirectTaskMeshComputePipeline(context.get());
+    indirectTaskMeshGraphics = Renderer::IndirectTaskMeshRenderPipeline(context.get());
 
     CreateBuffers();
 
@@ -103,7 +105,47 @@ void MeshTaskBenchmark::Run()
         time.Update();
 
         const float deltaTime = Time::Get().GetDeltaTime();
-        freeCamera.Update(deltaTime);
+        // freeCamera.Update(deltaTime);
+
+        if (input.IsKeyPressed(Key::NUM_1)) {
+            benchmarkType = BenchmarkType::Traditional;
+        }
+        if (input.IsKeyPressed(Key::NUM_2)) {
+            benchmarkType = BenchmarkType::IndirectTraditional;
+        }
+        if (input.IsKeyPressed(Key::NUM_3)) {
+            benchmarkType = BenchmarkType::Meshlet;
+        }
+        if (input.IsKeyPressed(Key::NUM_4)) {
+            benchmarkType = BenchmarkType::IndirectMeshlet;
+        }
+
+        if (benchmarkType != lastBenchmarkType) {
+            benchmarkTimer = 0.0f;
+            benchmarkFrameCount = 0;
+            averageFPS = 0.0f;
+            fpsDisplayTimer = 0.0f;
+            lastBenchmarkType = benchmarkType;
+            const char* benchmarkNames[] = {
+                "Traditional Pipeline",
+                "Indirect Traditional Pipeline",
+                "Meshlet Pipeline",
+                "Indirect Meshlet Pipeline"
+            };
+            fmt::println("\n========================================");
+            fmt::println("  {}", benchmarkNames[static_cast<int>(benchmarkType)]);
+            fmt::println("========================================\n");
+        }
+
+        benchmarkFrameCount++;
+        benchmarkTimer += deltaTime;
+        averageFPS = static_cast<float>(benchmarkFrameCount) / benchmarkTimer;
+        fpsDisplayTimer += deltaTime;
+        if (fpsDisplayTimer >= 1.0f) {
+            fmt::println("[{}] Average FPS: {:.1f} ({} frames over {:.2f}s)", static_cast<int>(benchmarkType), averageFPS, benchmarkFrameCount, benchmarkTimer);
+            fpsDisplayTimer = 0.0f;
+        }
+
 
         const uint32_t currentFrameInFlight = frameNumber % swapchain->imageCount;
         Renderer::FrameSynchronization& currentFrameSync = frameSynchronization[currentFrameInFlight];
@@ -280,6 +322,94 @@ void MeshTaskBenchmark::Meshlet(uint32_t currentFrameInFlight, std::array<uint32
     vkCmdEndRendering(cmd);
 }
 
+void MeshTaskBenchmark::IndirectMeshlet(uint32_t currentFrameInFlight, std::array<uint32_t, 2> extents, VkCommandBuffer cmd)
+{
+    VkBufferMemoryBarrier2 bufferBarriers[2];
+    bufferBarriers[0] = Renderer::VkHelpers::BufferMemoryBarrier(
+        meshletIndirectBuffer.handle, 0, sizeof(uint32_t),
+        VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT, VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT,
+        VK_PIPELINE_STAGE_2_CLEAR_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
+    bufferBarriers[1] = Renderer::VkHelpers::BufferMemoryBarrier(
+        meshletIndirectBuffer.handle, sizeof(glm::vec4), sizeof(Renderer::TaskIndirectDrawParameters) * Renderer::BINDLESS_INSTANCE_COUNT * 4,
+        VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT, VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT,
+        VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_WRITE_BIT);
+
+    VkDependencyInfo depInfo{};
+    depInfo.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+    depInfo.pNext = nullptr;
+    depInfo.dependencyFlags = 0;
+    depInfo.bufferMemoryBarrierCount = 2;
+    depInfo.pBufferMemoryBarriers = bufferBarriers;
+    vkCmdPipelineBarrier2(cmd, &depInfo);
+
+    vkCmdFillBuffer(cmd, meshletIndirectBuffer.handle, 0, sizeof(uint32_t), 0);
+
+    VkBufferMemoryBarrier2 bufferBarrier = Renderer::VkHelpers::BufferMemoryBarrier(
+        meshletIndirectBuffer.handle, 0, sizeof(uint32_t),
+        VK_PIPELINE_STAGE_2_CLEAR_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+        VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_WRITE_BIT);
+
+    depInfo.bufferMemoryBarrierCount = 1;
+    depInfo.pBufferMemoryBarriers = &bufferBarrier;
+
+    vkCmdPipelineBarrier2(cmd, &depInfo);
+
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, indirectTaskMeshCompute.pipeline.handle);
+
+    Renderer::AllocatedBuffer& currentSceneDataBuffer = sceneDataBuffers[currentFrameInFlight];
+    Renderer::IndirectTaskMeshComputePushConstant pushData{
+        .sceneData = currentSceneDataBuffer.address,
+        .primitiveBuffer = meshletPrimitiveBuffer.address,
+        .instanceBuffer = instanceBuffer.address,
+        .modelBuffer = modelBuffer.address,
+        .taskIndirectParameterBuffer = meshletIndirectBuffer.address
+    };
+
+    vkCmdPushConstants(cmd, indirectTaskMeshCompute.pipelineLayout.handle, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(Renderer::IndirectTaskMeshComputePushConstant), &pushData);
+    constexpr uint32_t groupsX = (125 + 63) / 64;
+    vkCmdDispatch(cmd, groupsX, 1, 1);
+
+
+    bufferBarrier = Renderer::VkHelpers::BufferMemoryBarrier(
+        meshletIndirectBuffer.handle, 0, VK_WHOLE_SIZE,
+        VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_WRITE_BIT,
+        VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT, VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT);
+    depInfo.pBufferMemoryBarriers = &bufferBarrier;
+    vkCmdPipelineBarrier2(cmd, &depInfo);
+
+    constexpr VkClearValue colorClear = {.color = {0.1f, 0.2f, 0.0f, 1.0f}};
+    const VkRenderingAttachmentInfo colorAttachment = Renderer::VkHelpers::RenderingAttachmentInfo(renderTargets->drawImageView.handle, &colorClear, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    constexpr VkClearValue depthClear = {.depthStencil = {0.0f, 0u}};
+    const VkRenderingAttachmentInfo depthAttachment = Renderer::VkHelpers::RenderingAttachmentInfo(renderTargets->depthImageView.handle, &depthClear, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL);
+    const VkRenderingInfo renderInfo = Renderer::VkHelpers::RenderingInfo({extents[0], extents[1]}, &colorAttachment, &depthAttachment);
+
+
+    vkCmdBeginRendering(cmd, &renderInfo);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, indirectTaskMeshGraphics.pipeline.handle);
+
+    VkViewport viewport = Renderer::VkHelpers::GenerateViewport(extents[0], extents[1]);
+    vkCmdSetViewport(cmd, 0, 1, &viewport);
+    VkRect2D scissor = Renderer::VkHelpers::GenerateScissor(extents[0], extents[1]);
+    vkCmdSetScissor(cmd, 0, 1, &scissor);
+
+    Renderer::IndirectTaskMeshRenderPushConstant pushData2{
+        .sceneData = currentSceneDataBuffer.address,
+        .vertexBuffer = megaVertexBuffer.address,
+        .meshletVerticesBuffer = megaMeshletVerticesBuffer.address,
+        .meshletTrianglesBuffer = megaMeshletTrianglesBuffer.address,
+        .meshletBuffer = megaMeshletBuffer.address,
+        .meshIndirectParameterBuffer = meshletIndirectBuffer.address,
+        .materialBuffer = materialBuffer.address,
+        .modelBuffer = modelBuffer.address,
+    };
+
+    vkCmdPushConstants(cmd, indirectTaskMeshGraphics.pipelineLayout.handle, VK_SHADER_STAGE_TASK_BIT_EXT | VK_SHADER_STAGE_MESH_BIT_EXT | VK_SHADER_STAGE_FRAGMENT_BIT, 0,
+                       sizeof(Renderer::IndirectTaskMeshRenderPushConstant), &pushData2);
+
+    vkCmdDrawMeshTasksIndirectCountEXT(cmd, meshletIndirectBuffer.handle, sizeof(glm::vec4), meshletIndirectBuffer.handle, 0, Renderer::BINDLESS_INSTANCE_COUNT, sizeof(glm::vec4) * 2);
+    vkCmdEndRendering(cmd);
+}
+
 void MeshTaskBenchmark::Render(uint32_t currentFrameInFlight, Renderer::FrameSynchronization& frameSync)
 {
     VK_CHECK(vkWaitForFences(context->device, 1, &frameSync.renderFence, true, UINT64_MAX));
@@ -337,7 +467,6 @@ void MeshTaskBenchmark::Render(uint32_t currentFrameInFlight, Renderer::FrameSyn
         vkCmdPipelineBarrier2(cmd, &dependencyInfo);
     }
 
-    constexpr auto benchmarkType = BenchmarkType::Meshlet;
     switch (benchmarkType) {
         case BenchmarkType::Traditional:
             Traditional(currentFrameInFlight, extents, cmd);
@@ -347,6 +476,9 @@ void MeshTaskBenchmark::Render(uint32_t currentFrameInFlight, Renderer::FrameSyn
             break;
         case BenchmarkType::Meshlet:
             Meshlet(currentFrameInFlight, extents, cmd);
+            break;
+        case BenchmarkType::IndirectMeshlet:
+            IndirectMeshlet(currentFrameInFlight, extents, cmd);
             break;
         default:
             break;
@@ -506,6 +638,9 @@ void MeshTaskBenchmark::CreateBuffers()
     bufferInfo.usage = VK_BUFFER_USAGE_2_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_2_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_2_TRANSFER_DST_BIT;
     bufferInfo.size = sizeof(glm::vec4) + sizeof(VkDrawIndexedIndirectCommand) * Renderer::BINDLESS_INSTANCE_COUNT;
     traditionalIndirectBuffer = Renderer::VkResources::CreateAllocatedBuffer(context.get(), bufferInfo, vmaAllocInfo);
+    // vec4 for indirect count + padding. Instance_count * 4 is an assumption that each instance is likely to have at most 4 * 32 meshlets
+    bufferInfo.size = sizeof(glm::vec4) + sizeof(Renderer::TaskIndirectDrawParameters) * Renderer::BINDLESS_INSTANCE_COUNT * 4;
+    meshletIndirectBuffer = Renderer::VkResources::CreateAllocatedBuffer(context.get(), bufferInfo, vmaAllocInfo);
 }
 
 void MeshTaskBenchmark::InstanceGeneration()

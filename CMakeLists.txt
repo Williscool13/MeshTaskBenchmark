@@ -65,6 +65,10 @@ compile_shaders(meshTaskBenchmark
         ${CMAKE_SOURCE_DIR}/shaders/meshTask.slang task taskMain
         ${CMAKE_SOURCE_DIR}/shaders/meshTask.slang mesh meshMain
         ${CMAKE_SOURCE_DIR}/shaders/meshTask.slang fragment fragmentMain
+        ${CMAKE_SOURCE_DIR}/shaders/indirectMeshTask.slang compute computeMain
+        ${CMAKE_SOURCE_DIR}/shaders/indirectMeshTask.slang task taskMain
+        ${CMAKE_SOURCE_DIR}/shaders/indirectMeshTask.slang mesh meshMain
+        ${CMAKE_SOURCE_DIR}/shaders/indirectMeshTask.slang fragment fragmentMain
 )
 
 

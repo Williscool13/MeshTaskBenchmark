@@ -1,5 +1,74 @@
 import common;
 
+const static int32_t TASK_SHADER_DISPATCH_X = 64;
+const static int32_t MESH_SHADER_DISPATCH_X = 32;
+const static uint MAX_VERTICES = 64;
+const static uint MAX_PRIMITIVES = 64;
+
+bool frustumCullSphere(Frustum frustum, float4 sphere) {
+    // sphere.xyz = center, sphere.w = radius
+    for (int i = 0; i < 6; i++) {
+        float4 plane = frustum.planes[i];
+        float dist = dot(plane.xyz, sphere.xyz) + plane.w;
+        if (dist < -sphere.w) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// ==================== Compute Shader (Instance Culling) ====================
+struct ComputePushConst {
+    SceneData* sceneData;
+
+    MeshletPrimitiveData* primitiveBuffer;
+    InstanceData* instanceBuffer;
+    ModelData* modelBuffer;
+
+    MeshIndirectParameterBuffer* meshIndirectBuffer;
+};
+
+bool isInstanceVisible(Instance inst, MeshletPrimitive prim) {
+    return true;
+}
+
+[numthreads(64, 1, 1)]
+void computeMain(uniform ComputePushConst pushConstants, uint3 dtid : SV_DispatchThreadID) {
+    uint instanceID = dtid.x;
+
+    Instance inst = pushConstants.instanceBuffer->instances[instanceID];
+    if (inst.bIsAllocated == 0) { return; }
+
+    MeshletPrimitive prim = pushConstants.primitiveBuffer->primitives[inst.primitiveIndex];
+    Model model = pushConstants.modelBuffer->models[inst.modelIndex];
+
+    float4 boundingSphere = prim.boundingSphere;
+    float3 worldCenter = mul(model.modelMatrix, float4(boundingSphere.xyz, 1.0)).xyz;
+    float4 worldBounds = float4(worldCenter, boundingSphere.w);
+    if (!frustumCullSphere(pushConstants.sceneData->frustum, worldBounds)) {
+        return;  // Instance culled
+    }
+
+    // prim.bHasTransparent;
+    // prim.bHasSkinning
+    // prim.boundingSphere
+
+    // Each group processes TASK_SHADER_DISPATCH_X number of meshlets, so if its greater than that we need to do multiple dispatches
+    uint totalMeshlets = prim.meshletCount;
+    uint numChunks = (totalMeshlets + (TASK_SHADER_DISPATCH_X - 1)) / TASK_SHADER_DISPATCH_X;
+
+    uint commandIndex = pushConstants.meshIndirectBuffer.meshIndirectCount.add(1);
+    pushConstants.meshIndirectBuffer.parameters[commandIndex].groupCountX = numChunks;
+    pushConstants.meshIndirectBuffer.parameters[commandIndex].groupCountY = 1;
+    pushConstants.meshIndirectBuffer.parameters[commandIndex].groupCountZ = 1;
+    pushConstants.meshIndirectBuffer.parameters[commandIndex].modelIndex = inst.modelIndex;
+    pushConstants.meshIndirectBuffer.parameters[commandIndex].materialIndex = prim.materialIndex;
+    pushConstants.meshIndirectBuffer.parameters[commandIndex].meshletOffset = prim.meshletOffset;
+    pushConstants.meshIndirectBuffer.parameters[commandIndex].meshletCount = prim.meshletCount;
+}
+
+
+// ==================== Task Shader ====================
 struct VertexOutput
 {
     float4 position : SV_Position;
@@ -18,37 +87,19 @@ struct PushConsts {
 
     // Statics
     VertexData* vertexBuffer;
-    MeshletPrimitiveData* primitiveBuffer;
     MeshletVerticesData* meshletVerticesBuffer;
     MeshletTrianglesData* meshletTrianglesBuffer;
     MeshletData* meshletBuffer;
 
+    MeshIndirectParameterBuffer* meshIndirectParameterBuffer;
+
     // Dynamics
     MaterialData* materialBuffer; // well, this ones not yet dynamic
     ModelData* modelBuffer;
-    InstanceData* instanceBuffer;
 };
 
-bool frustumCullSphere(Frustum frustum, float4 sphere) {
-    // sphere.xyz = center, sphere.w = radius
-    for (int i = 0; i < 6; i++) {
-        float4 plane = frustum.planes[i];
-        float dist = dot(plane.xyz, sphere.xyz) + plane.w;
-        if (dist < -sphere.w) {
-            return false;
-        }
-    }
-    return true;
-}
-
-// ==================== Task Shader ====================
-const static int32_t TASK_SHADER_DISPATCH_X = 64;
-const static int32_t MESH_SHADER_DISPATCH_X = 32;
-const static uint MAX_VERTICES = 64;
-const static uint MAX_PRIMITIVES = 64;
-
 // Per https://developer.nvidia.com/blog/using-mesh-shaders-for-professional-graphics/
-// Task shader output should ideally be below 236/108. We can hit <108 if we turn uint32_t to uint8_t and store offsets in the payload.
+// Task shader output should ideally be below 236/108. We can hit 236 if we turn uint32_t to uint8_t and store offsets in the payload.
 // 4 + 4 + 4 + 64 = 86
 struct MeshletPayload {
     uint32_t modelIndex;
@@ -64,28 +115,26 @@ groupshared Atomic<uint32_t> visibleMeshletCount;
 [shader("task")]
 [numthreads(TASK_SHADER_DISPATCH_X, 1, 1)]
 void taskMain(uniform PushConsts pushConstants,
-    uint3 gid : SV_GroupID, uint3 gtid : SV_GroupThreadID)
+    uint3 gid : SV_GroupID, uint3 gtid : SV_GroupThreadID, uint drawIndex : SV_DrawIndex)
 {
-    uint32_t instanceId = gid.y;
-    Instance inst = pushConstants.instanceBuffer->instances[instanceId];
-    if (inst.bIsAllocated == 0) { return; }
-
-    MeshletPrimitive prim = pushConstants.primitiveBuffer->primitives[inst.primitiveIndex];
-    Model model = pushConstants.modelBuffer->models[inst.modelIndex];
+    MeshIndirectDrawParameters indirectParameters = pushConstants.meshIndirectParameterBuffer->parameters[drawIndex];
 
     if (gtid.x == 0) {
         visibleMeshletCount.store(0);
 
-        sharedPayload.modelIndex = inst.modelIndex;
-        sharedPayload.materialIndex = prim.materialIndex;
-        sharedPayload.groupMeshletOffset = prim.meshletOffset + (gid.x * TASK_SHADER_DISPATCH_X);
+        sharedPayload.modelIndex = indirectParameters.modelIndex;
+        sharedPayload.materialIndex = indirectParameters.materialIndex;
+        sharedPayload.groupMeshletOffset = indirectParameters.meshletOffset + (gid.x * TASK_SHADER_DISPATCH_X);
     }
 
     GroupMemoryBarrierWithGroupSync();
 
-    // group thread count is only 64, will never exceed uint8
+
+    Model model = pushConstants.modelBuffer->models[indirectParameters.modelIndex];
+
+    // group thread count is only 32, will never exceed uint8
     uint8_t meshletID = (uint8_t)gtid.x;
-    uint localMeshletCount = min(TASK_SHADER_DISPATCH_X, prim.meshletCount - (gid.x * TASK_SHADER_DISPATCH_X));
+    uint localMeshletCount = min(TASK_SHADER_DISPATCH_X, indirectParameters.meshletCount - (gid.x * TASK_SHADER_DISPATCH_X));
 
     if (meshletID < localMeshletCount) {
         Meshlet mlet = pushConstants.meshletBuffer->meshlets[sharedPayload.groupMeshletOffset + meshletID];
@@ -127,7 +176,6 @@ void taskMain(uniform PushConsts pushConstants,
     }
 }
 
-// ==================== Mesh Shader ====================
 [shader("mesh")]
 [outputtopology("triangle")]
 [numthreads(MESH_SHADER_DISPATCH_X, 1, 1)]
@@ -187,17 +235,17 @@ struct FragmentOutput {
 [shader("fragment")]
 FragmentOutput fragmentMain(VertexOutput input, uniform PushConsts pushConstants)
 {
-    MaterialProperties material = pushConstants.materialBuffer->materials[input.materialIndex];
+        MaterialProperties material = pushConstants.materialBuffer->materials[input.materialIndex];
 
-    float3 N = normalize(input.normal);
-    float3 V = normalize(pushConstants.sceneData->cameraWorldPos.xyz - input.worldPos);
-    float3 L = normalize(float3(1.0, 1.0, 1.0));
+        float3 N = normalize(input.normal);
+        float3 V = normalize(pushConstants.sceneData->cameraWorldPos.xyz - input.worldPos);
+        float3 L = normalize(float3(1.0, 1.0, 1.0));
 
-    float3 ambient = 0.1;
-    float3 diffuse = max(dot(N, L), 0.0) * material.colorFactor.rgb;
+        float3 ambient = 0.1;
+        float3 diffuse = max(dot(N, L), 0.0) * material.colorFactor.rgb;
 
-    FragmentOutput output;
-    output.color = float4(ambient + diffuse, material.colorFactor.a);
+        FragmentOutput output;
+        output.color = float4(ambient + diffuse, material.colorFactor.a);
 
-    return output;
+        return output;
 }
